@@ -1,66 +1,79 @@
-import unittest
-from mock import Mock
-import time
-import urlparse
 import base64
 import copy
-from flask import Flask, session, request
-from werkzeug.exceptions import BadRequest
-from saml2 import (VERSION, saml, samlp,
-    BINDING_HTTP_REDIRECT, BINDING_HTTP_POST)
-from saml2.ident import IdentDB, code, decode
-from saml2.server import Server
+import os
+import time
+import urllib.parse as urlparse
+from typing import Any
+
+import pytest
+from flask import Flask, request, session
+from saml2 import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT, VERSION, saml, samlp
+from saml2.authn_context import INTERNETPROTOCOLPASSWORD
 from saml2.client import Saml2Client
 from saml2.config import IdPConfig, SPConfig
-from saml2.mdstore import MetaData, destinations
-from saml2.s_utils import (decode_base64_and_inflate, deflate_and_base64_encode,
-    UnsupportedBinding)
-from saml2.authn_context import INTERNETPROTOCOLPASSWORD
-from saml2.saml import NameID, NAMEID_FORMAT_TRANSIENT
+from saml2.ident import IdentDB
+from saml2.mdstore import locations
+from saml2.s_utils import (
+    UnsupportedBinding,
+    decode_base64_and_inflate,
+    deflate_and_base64_encode,
+)
+from saml2.saml import NAMEID_FORMAT_TRANSIENT
 from saml2.samlp import Response
+from saml2.server import Server
+from saml2.sigver import SignatureError
 from saml2.time_util import instant
-from saml2.sigver import SignatureError, SigverError
+from werkzeug.exceptions import BadRequest
 
 import flask_pysaml2 as auth
-from sp_config import CONFIG as sp_config
-from idp_config import CONFIG as idp_config
 
-import os
+from .idp_config import CONFIG as idp_config
+from .sp_config import CONFIG as sp_config
+
 root_path = os.path.dirname(os.path.abspath(__file__))
 
+SUPER_SECRET_KEY = "Super secret key. Shhhh!"
 AUTHN = {
     "class_ref": INTERNETPROTOCOLPASSWORD,
-    "authn_auth": "http://www.example.com/login"
+    "authn_auth": "http://www.example.com/login",
 }
 
-def create_authn_response(session_id, identity=dict(),
-                          sign_response=True, sign_assertion=True,
-                          encrypt_assertion=False):
+
+def create_authn_response(
+    session_id,
+    identity: dict | None = None,
+    sign_response: bool = True,
+    sign_assertion: bool = True,
+    encrypt_assertion: bool = False,
+) -> tuple[Any, bytes]:
+    identity = identity or {}
     config = IdPConfig()
     config.load(idp_config)
     idp_server = Server(config=config)
-    idp_server.ident = IdentDB(auth.AuthDictCache(dict(), '_ident'))
+    idp_server.ident = IdentDB(auth.AuthDictCache({}, "_ident"))
     authn_response = idp_server.create_authn_response(
         identity=identity,
         in_response_to=session_id,
-        destination='https://foo.example.com/sp/acs',
-        sp_entity_id='https://foo.example.com/sp/metadata',
+        destination="https://foo.example.com/sp/acs",
+        sp_entity_id="https://foo.example.com/sp/metadata",
         name_id_policy=None,
-        userid='Irrelevent',
+        userid="Irrelevent",
         authn=AUTHN,
         sign_response=sign_response,
         sign_assertion=sign_assertion,
-        encrypt_cert=None, # TODO: Figure out how to make this work.
+        encrypt_cert=None,  # TODO: Figure out how to make this work.
         encrypt_assertion=encrypt_assertion,
-        instance=True
-        )
+        instance=True,
+    )
     if isinstance(authn_response, Response):
-        authn_response = authn_response.to_string()
+        authn_response = str(authn_response)
     response = samlp.response_from_string(authn_response)
-    return response.assertion[0].subject.name_id.text, authn_response
+    return response.assertion[0].subject.name_id.text, authn_response.encode("utf-8")
 
-def create_logout_response(subject_id, destination, issuer_entity_id,
-        req_entity_id, sign=True):
+
+def create_logout_response(
+    subject_id, destination, issuer_entity_id, req_entity_id, sign: bool = True
+) -> tuple[Any, bytes]:
     config = IdPConfig()
     config.load(idp_config)
     idp_server = Server(config=config)
@@ -69,43 +82,55 @@ def create_logout_response(subject_id, destination, issuer_entity_id,
         subject_id=subject_id,
         destination=destination,
         issuer_entity_id=issuer_entity_id,
-        req_entity_id=req_entity_id)
+        req_entity_id=req_entity_id,
+    )
 
-    enc_logout_request = deflate_and_base64_encode("%s" % logout_request)
-    req_info = idp_server.parse_logout_request(enc_logout_request,
-                                            BINDING_HTTP_REDIRECT)
+    enc_logout_request = deflate_and_base64_encode(f"{logout_request}")
+    req_info = idp_server.parse_logout_request(
+        enc_logout_request, BINDING_HTTP_REDIRECT
+    )
     bindings = [BINDING_HTTP_REDIRECT]
-    response = idp_server.create_logout_response(req_info.message,
-                                          bindings, sign=sign)
-    http_args = idp_server.apply_binding(BINDING_HTTP_REDIRECT, "%s" % response, destination,
-                                  "relay_state", response=True)
-    location = dict(http_args.get('headers')).get('Location')
+    response = idp_server.create_logout_response(req_info.message, bindings, sign=sign)
+    http_args = idp_server.apply_binding(
+        BINDING_HTTP_REDIRECT,
+        f"{response}",
+        destination,
+        "relay_state",
+        response=True,
+    )
+    location = dict(http_args.get("headers")).get("Location")
     url = urlparse.urlparse(location)
     params = urlparse.parse_qs(url.query)
-    logout_response_xml = decode_base64_and_inflate(params['SAMLResponse'][0])
+    logout_response_xml = decode_base64_and_inflate(params["SAMLResponse"][0])
     response = samlp.logout_response_from_string(logout_response_xml)
     return response.in_response_to, logout_response_xml
 
-def create_logout_request(subject_id, destination, issuer_entity_id,
-        req_entity_id, sign=True):
+
+def create_logout_request(
+    subject_id, destination, issuer_entity_id, req_entity_id, sign: bool = True
+) -> samlp.LogoutRequest:
     config = SPConfig()
     config.load(sp_config)
-    sp_client = Saml2Client(config=config)
+    Saml2Client(config=config)
     # construct a request
     logout_request = samlp.LogoutRequest(
-        id='a123456',
+        id="a123456",
         version=VERSION,
         destination=destination,
         issue_instant=instant(),
-        issuer=saml.Issuer(text=req_entity_id,
-            format=saml.NAMEID_FORMAT_ENTITY),
-        name_id=saml.NameID(name_qualifier='https://sso.example.com/idp/metadata',
-                            format=NAMEID_FORMAT_TRANSIENT, text=subject_id))
+        issuer=saml.Issuer(text=req_entity_id, format=saml.NAMEID_FORMAT_ENTITY),
+        name_id=saml.NameID(
+            name_qualifier="https://sso.example.com/idp/metadata",
+            format=NAMEID_FORMAT_TRANSIENT,
+            text=subject_id,
+        ),
+    )
     return logout_request
+
 
 # taken from tests/fakeIDP.py in the pysaml2 repo
 def unpack_form(_str, ver="SAMLRequest"):
-    SR_STR = "name=\"%s\" value=\"" % ver
+    SR_STR = f'name="{ver}" value="'
     RS_STR = 'name="RelayState" value="'
 
     i = _str.find(SR_STR)
@@ -122,1050 +147,1158 @@ def unpack_form(_str, ver="SAMLRequest"):
 
     return {ver: sr, "RelayState": rs}
 
-class TestSaml(unittest.TestCase):
 
-    def setUp(self):
-        super(TestSaml, self).setUp()
-        self.app = Flask(__name__)
-        self.app.secret_key = 'Super secret key. Shhhh!'
-        self.client = self.app.test_client()
+@pytest.fixture
+def flask_app():
+    app = Flask(__name__)
+    app.secret_key = SUPER_SECRET_KEY
+    return app
 
-    def test_AuthDictCache(self):
-        with self.app.test_request_context('/',
-                method='GET'):
+
+class TestSaml:
+    def test_AuthDictCache(self, flask_app):
+        with flask_app.test_request_context("/", method="GET"):
             # assert empty session
-            self.assertEqual(session, {})
+            assert session == {}
             # create cache pointing at undefined key in empty session
-            cache = auth.AuthDictCache(session, '_test')
+            cache = auth.AuthDictCache(session, "_test")
             # assert empty
-            self.assertEqual(cache, {})
-            self.assertEqual(cache.session_data, {})
+            assert cache == {}
+            assert cache.session_data == {}
             # verify that cache works like a normal dict
-            cache['key_1'] = 'value_1'
-            self.assertEqual(cache, {'key_1': 'value_1'})
-            cache['key_2'] = 'value_2'
-            cache.update({'key_1': 'value_4', 'key_3': 'value_3'})
-            self.assertEqual(cache, {
-                'key_1': 'value_4', 'key_2': 'value_2', 'key_3': 'value_3'})
+            cache["key_1"] = "value_1"
+            assert cache == {"key_1": "value_1"}
+            cache["key_2"] = "value_2"
+            cache.update({"key_1": "value_4", "key_3": "value_3"})
+            assert cache == {"key_1": "value_4", "key_2": "value_2", "key_3": "value_3"}
             # verify that data has not been sync'ed to the session
-            self.assertEqual(session, {})
-            self.assertEqual(cache.session_data, {})
+            assert session == {}
+            assert cache.session_data == {}
             # verify that data has been sync'ed to the session
             cache.sync()
-            self.assertEqual(cache.session_data,
-                {'key_1': 'value_4', 'key_2': 'value_2', 'key_3': 'value_3'})
-            self.assertEqual(session.get('_test'),
-                {'key_1': 'value_4', 'key_2': 'value_2', 'key_3': 'value_3'})
+            assert cache.session_data == {
+                "key_1": "value_4",
+                "key_2": "value_2",
+                "key_3": "value_3",
+            }
+            assert session.get("_test") == {
+                "key_1": "value_4",
+                "key_2": "value_2",
+                "key_3": "value_3",
+            }
             # if we create a cache pointing to existing session data, it
             # should be populated
-            cache = auth.AuthDictCache(session, '_test')
-            self.assertEqual(cache,
-                {'key_1': 'value_4', 'key_2': 'value_2', 'key_3': 'value_3'})
+            cache = auth.AuthDictCache(session, "_test")
+            assert cache == {"key_1": "value_4", "key_2": "value_2", "key_3": "value_3"}
 
-    def test_IdentityCache(self):
-        with self.app.test_request_context('/',
-                method='GET'):
+    def test_IdentityCache(self, flask_app):
+        with flask_app.test_request_context("/", method="GET"):
             # assert empty session
-            self.assertEqual(session, {})
+            assert session == {}
             # create cache pointing at undefined key in empty session
-            cache = auth.IdentityCache(session, '_test')
-            self.assertEqual(session, {})
-            self.assertEqual(cache._db, {})
-            self.assertTrue(cache._sync)
+            cache = auth.IdentityCache(session, "_test")
+            assert session == {}
+            assert cache._db == {}
+            assert cache._sync is True
             # Add something to the cache _db
-            name_id = saml.NameID('subject_id')
-            cache.set(name_id, 'entity_id', 'info')
+            name_id = saml.NameID("subject_id")
+            cache_info = {"name_id": "subject_id"}
+            cache.set(name_id, "entity_id", cache_info)
             # verify that data has  been sync'ed to the session automagically
-            self.assertEqual(cache._db,
-                {'0=subject_id': {'entity_id': (0, 'info')}})
-            self.assertEqual(session.get('_test'),
-                {'0=subject_id': {'entity_id': (0, 'info')}})
+            assert cache._db == {"0=subject_id": {"entity_id": (0, cache_info)}}
+            assert session.get("_test") == {
+                "0=subject_id": {"entity_id": (0, cache_info)}
+            }
             # if we create a cache pointing to existing session data, it
             # should be populated
-            cache = auth.IdentityCache(session, '_test')
-            self.assertEqual(cache._db,
-                {'0=subject_id': {'entity_id': (0, 'info')}})
+            cache = auth.IdentityCache(session, "_test")
+            assert cache._db == {"0=subject_id": {"entity_id": (0, cache_info)}}
 
-    def test_Saml_init(self):
-        entity_id = 'https://sso.example.com/idp/metadata'
-        with self.app.test_request_context('/',
-                method='GET'):
-            try:
-                sp = auth.Saml({'service': {'sp':'invalid'}})
-                self.fail(
-                    'Expected TypeError on invalid submission to Saml __init__')
-            except TypeError:
-                pass
+    def test_Saml_init(self, flask_app):
+        entity_id = "https://sso.example.com/idp/metadata"
+        with flask_app.test_request_context("/", method="GET"):
+            with pytest.raises(TypeError):
+                auth.Saml({"service": {"sp": "invalid"}})
             sp = auth.Saml(sp_config)
             # metadata (A single IdP)
-            self.assertEqual(sp._config.metadata.identity_providers(),
-                [entity_id])
+            assert sp._config.metadata.identity_providers() == [entity_id]
             # SP end points
             slo = sp._config.metadata.single_logout_service(
-                entity_id, binding=BINDING_HTTP_REDIRECT, typ='idpsso')[0]
-            self.assertEqual(slo['location'],
-                'https://sso.example.com/idp/slo')
-            self.assertEqual(slo['binding'],
-                'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect')
+                entity_id, binding=BINDING_HTTP_REDIRECT, typ="idpsso"
+            )[0]
+            assert slo["location"] == "https://sso.example.com/idp/slo"
+            assert (
+                slo["binding"] == "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"
+            )
             sso = sp._config.metadata.single_sign_on_service(entity_id)[0]
-            self.assertEqual(sso['location'],
-                'https://sso.example.com/idp/sso')
-            self.assertEqual(sso['binding'],
-                'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect')
+            assert sso["location"] == "https://sso.example.com/idp/sso"
+            assert (
+                sso["binding"] == "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"
+            )
             # Configured default IdP and discovery service
-            self.assertEqual([entity_id], sp._config.getattr('idp'))
-            self.assertEqual('https://ds.example.com/disco',
-                             sp.discovery_service_end_point)
+            assert [entity_id] == sp._config.getattr("idp")
+            assert "https://ds.example.com/disco" == sp.discovery_service_end_point
 
-    def test_Saml_init_idp_as_inline_dict(self):
+    def test_Saml_init_idp_as_inline_dict(self, flask_app):
         tmp_sp_config = copy.deepcopy(sp_config)
-        entity_id = 'https://sso.example.com/idp/metadata'
-        tmp_sp_config['metadata']['inline_dict'] = [{
-            'entityid': entity_id,
-            'contact_person': [{
-                'email_address': 'helpdesk@kavi.com',
-                'contact_type': 'technical',
-                },
-            ],
-            'service': {
-                'idp': {
-                    'name': 'Test Identity Provider',
-                    'endpoints': {
-                        'single_sign_on_service': [(
-                            'https://sso.example.com/idp/sso',
-                            BINDING_HTTP_REDIRECT)],
-                        'single_logout_service': [(
-                            'https://sso.example.com/idp/slo',
-                            BINDING_HTTP_REDIRECT)],
+        entity_id = "https://sso.example.com/idp/metadata-inline"
+        tmp_sp_config["metadata"]["inline_dict"] = [
+            {
+                "entityid": entity_id,
+                "contact_person": [
+                    {
+                        "email_address": "helpdesk@kavi.com",
+                        "contact_type": "technical",
                     },
-                    'policy': {
-                        'default': {
-                            'lifetime': {'hours': 24},
-                            'attribute_restrictions': None,
-                            'name_form':
-                                'urn:oasis:names:tc:SAML:2.0:attrname-format:uri',
+                ],
+                "service": {
+                    "idp": {
+                        "name": "Test Identity Provider",
+                        "endpoints": {
+                            "single_sign_on_service": [
+                                (
+                                    "https://sso.example.com/idp/sso",
+                                    BINDING_HTTP_REDIRECT,
+                                )
+                            ],
+                            "single_logout_service": [
+                                (
+                                    "https://sso.example.com/idp/slo",
+                                    BINDING_HTTP_REDIRECT,
+                                )
+                            ],
+                        },
+                        "policy": {
+                            "default": {
+                                "lifetime": {"hours": 24},
+                                "attribute_restrictions": None,
+                                "name_form": "urn:oasis:names:tc:SAML:2.0:attrname-format:uri",
+                            },
                         },
                     },
                 },
-            },
-            'cert_file': root_path + '/sso_public.crt',
-        }]
-        with self.app.test_request_context('/',
-                method='GET'):
+                "cert_file": root_path + "/sso_public.crt",
+            }
+        ]
+        with flask_app.test_request_context("/", method="GET"):
             sp = auth.Saml(tmp_sp_config)
-            self.assertIn(entity_id, sp._config.metadata.identity_providers())
+            assert entity_id in sp._config.metadata.identity_providers()
             slo = sp._config.metadata.single_logout_service(
-                entity_id, binding=BINDING_HTTP_REDIRECT, typ='idpsso')[0]
-            self.assertEqual(slo['location'],
-                'https://sso.example.com/idp/slo')
-            self.assertEqual(slo['binding'],
-                'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect')
+                entity_id, binding=BINDING_HTTP_REDIRECT, typ="idpsso"
+            )[0]
+            assert slo["location"] == "https://sso.example.com/idp/slo"
+            assert (
+                slo["binding"] == "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"
+            )
             sso = sp._config.metadata.single_sign_on_service(entity_id)[0]
-            self.assertEqual(sso['location'],
-                'https://sso.example.com/idp/sso')
-            self.assertEqual(sso['binding'],
-                'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect')
+            assert sso["location"] == "https://sso.example.com/idp/sso"
+            assert (
+                sso["binding"] == "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"
+            )
 
-    def test_Saml_init_idp_as_inline_dict_multicert(self):
+    def test_Saml_init_idp_as_inline_dict_multicert(self, flask_app):
         tmp_sp_config = copy.deepcopy(sp_config)
-        entity_id = 'https://sso.example.com/idp/metadata'
-        tmp_sp_config['metadata']['inline_dict'] = [{
-            'entityid': entity_id,
-            'contact_person': [{
-                'email_address': 'helpdesk@kavi.com',
-                'contact_type': 'technical',
-                },
-            ],
-            'service': {
-                'idp': {
-                    'name': 'Test Identity Provider',
-                    'endpoints': {
-                        'single_sign_on_service': [(
-                            'https://sso.example.com/idp/sso',
-                            BINDING_HTTP_REDIRECT)],
-                        'single_logout_service': [(
-                            'https://sso.example.com/idp/slo',
-                            BINDING_HTTP_REDIRECT)],
+        entity_id = "https://sso.example.com/idp/metadata-inline"
+        tmp_sp_config["metadata"]["inline_dict"] = [
+            {
+                "entityid": entity_id,
+                "contact_person": [
+                    {
+                        "email_address": "helpdesk@kavi.com",
+                        "contact_type": "technical",
                     },
-                    'policy': {
-                        'default': {
-                            'lifetime': {'hours': 24},
-                            'attribute_restrictions': None,
-                            'name_form':
-                                'urn:oasis:names:tc:SAML:2.0:attrname-format:uri',
+                ],
+                "service": {
+                    "idp": {
+                        "name": "Test Identity Provider",
+                        "endpoints": {
+                            "single_sign_on_service": [
+                                (
+                                    "https://sso.example.com/idp/sso",
+                                    BINDING_HTTP_REDIRECT,
+                                )
+                            ],
+                            "single_logout_service": [
+                                (
+                                    "https://sso.example.com/idp/slo",
+                                    BINDING_HTTP_REDIRECT,
+                                )
+                            ],
+                        },
+                        "policy": {
+                            "default": {
+                                "lifetime": {"hours": 24},
+                                "attribute_restrictions": None,
+                                "name_form": "urn:oasis:names:tc:SAML:2.0:attrname-format:uri",
+                            },
                         },
                     },
                 },
-            },
-            # Note: You can NOT build metadata from a Config object that doesn't
-            # have `cert_file` set. So even if you want to hack in multiple
-            # certs, you still have to pass in a valid path to a file.
-            'cert_file': root_path + '/sso_public.crt',
-            'certs': [
-                {
-                    'cert_file': root_path + '/sso_public.crt',
-                    'use': 'signing',
-                },
-                {
-                    'cert_file': root_path + '/sso_alt_public.crt',
-                    'use': 'both',
-                },
-                {
-                    'cert_data': 'ThisIsNotReallyACertButItIsAString',
-                    'use': 'encryption',
-                },
-            ],
-        }]
-        with self.app.test_request_context('/',
-                method='GET'):
+                # Note: You can NOT build metadata from a Config object that doesn't
+                # have `cert_file` set. So even if you want to hack in multiple
+                # certs, you still have to pass in a valid path to a file.
+                "cert_file": root_path + "/sso_public.crt",
+                "certs": [
+                    {
+                        "cert_file": root_path + "/sso_public.crt",
+                        "use": "signing",
+                    },
+                    {
+                        "cert_file": root_path + "/sso_alt_public.crt",
+                        "use": "both",
+                    },
+                    {
+                        "cert_data": "ThisIsNotReallyACertButItIsAString",
+                        "use": "encryption",
+                    },
+                ],
+            }
+        ]
+        with flask_app.test_request_context("/", method="GET"):
             sp = auth.Saml(tmp_sp_config)
-            self.assertIn(entity_id, sp._config.metadata.identity_providers())
-            self.assertEqual(2,
-                len(sp._config.metadata.certs(entity_id, "idpsso", "signing")))
-            self.assertEqual(2,
-                len(sp._config.metadata.certs(entity_id, "idpsso", "encryption")))
+            assert entity_id in sp._config.metadata.identity_providers()
+            assert 2 == len(sp._config.metadata.certs(entity_id, "idpsso", "signing"))
+            assert 2 == len(
+                sp._config.metadata.certs(entity_id, "idpsso", "encryption")
+            )
 
-    def test_Saml_authenticate(self):
+
+class TestSamlAuthenticate:
+    def test_Saml_authenticate(self, flask_app):
         # modifying config in this test, make copy so as not to effect
         # following tests.
         tmp_sp_config = copy.deepcopy(sp_config)
         # test signed authentication request
-        with self.app.test_request_context('/',
-                method='GET'):
+        with flask_app.test_request_context("/", method="GET"):
             sp = auth.Saml(tmp_sp_config)
-            resp = sp.authenticate(next_url='/next')
-            self.assertEqual(resp.status_code, 302)
-            self.assert_('SAMLRequest' in resp.headers['Location'])
-            url = urlparse.urlparse(resp.headers['Location'])
-            self.assertEqual(url.hostname, 'sso.example.com')
-            self.assertEqual(url.path, '/idp/sso')
+            resp = sp.authenticate(next_url="/next")
+            assert resp.status_code == 302
+            assert "SAMLRequest" in resp.headers["Location"]
+            url = urlparse.urlparse(resp.headers["Location"])
+            assert url.hostname == "sso.example.com"
+            assert url.path == "/idp/sso"
             params = urlparse.parse_qs(url.query)
-            self.assert_('SAMLRequest' in params)
-            self.assertEqual(params['RelayState'], ['/next'])
+            assert "SAMLRequest" in params
+            assert "Signature" in params
+            assert params["RelayState"] == ["/next"]
             authn = samlp.authn_request_from_string(
-                decode_base64_and_inflate(params['SAMLRequest'][0]))
-            self.assertEqual(authn.destination,
-                'https://sso.example.com/idp/sso')
-            self.assertEqual(authn.assertion_consumer_service_url,
-                'https://foo.example.com/sp/acs')
-            self.assertEqual(authn.protocol_binding, BINDING_HTTP_POST)
-            self.assertIsNotNone(authn.signature)
-            self.assertEqual(session['_saml_outstanding_queries'],
-                {authn.id: '/next'})
+                decode_base64_and_inflate(params["SAMLRequest"][0])
+            )
+            assert authn.destination == "https://sso.example.com/idp/sso"
+            assert (
+                authn.assertion_consumer_service_url == "https://foo.example.com/sp/acs"
+            )
+            assert authn.protocol_binding == BINDING_HTTP_POST
+            assert session["_saml_outstanding_queries"] == {authn.id: "/next"}
+
+    def test_Saml_authenticate_unsigned(self, flask_app):
+        # modifying config in this test, make copy so as not to effect
+        # following tests.
+        tmp_sp_config = copy.deepcopy(sp_config)
         # test un-signed authentication request
-        with self.app.test_request_context('/',
-                method='GET'):
-            tmp_sp_config['service']['sp']['authn_requests_signed'] = None
+        with flask_app.test_request_context("/", method="GET"):
+            tmp_sp_config["service"]["sp"]["authn_requests_signed"] = None
             sp = auth.Saml(tmp_sp_config)
-            resp = sp.authenticate(next_url='/next')
-            self.assertEqual(resp.status_code, 302)
-            self.assert_('SAMLRequest' in resp.headers['Location'])
-            url = urlparse.urlparse(resp.headers['Location'])
+            resp = sp.authenticate(next_url="/next")
+            assert resp.status_code == 302
+            url = urlparse.urlparse(resp.headers["Location"])
             params = urlparse.parse_qs(url.query)
-            authn = samlp.authn_request_from_string(
-                decode_base64_and_inflate(params['SAMLRequest'][0]))
-            self.assertIsNone(authn.signature)
+            assert "SAMLRequest" in params
+            assert "Signature" not in params
 
-    def test_Saml_authenticate_via_post(self):
+    def test_Saml_authenticate_via_post(self, flask_app):
         # modifying config in this test, make copy so as not to effect
         # following tests.
         tmp_sp_config = copy.deepcopy(sp_config)
         # test signed authentication request
-        with self.app.test_request_context('/',
-                method='GET'):
-            tmp_sp_config['metadata'] = {
-                'local': [root_path + '/idp_post_metadata.xml']
+        with flask_app.test_request_context("/", method="GET"):
+            tmp_sp_config["metadata"] = {
+                "local": [root_path + "/idp_post_metadata.xml"]
             }
             sp = auth.Saml(tmp_sp_config)
-            resp, status = sp.authenticate(next_url='/next',
-                binding=BINDING_HTTP_POST)
-            self.assertEqual(status, 200)
-            _form = unpack_form(resp['data'][3])
-            self.assert_('SAMLRequest' in _form)
-            self.assert_('RelayState' in _form)
-            authn_id = session['_saml_outstanding_queries'].keys()[0]
-            self.assertEqual(session['_saml_outstanding_queries'],
-                {authn_id: '/next'})
+            resp, status = sp.authenticate(next_url="/next", binding=BINDING_HTTP_POST)
+            assert status == 200
+            _form = unpack_form(resp["data"][3])
+            assert "SAMLRequest" in _form
+            assert "RelayState" in _form
+            authn_id = next(iter(session["_saml_outstanding_queries"].keys()))
+            assert session["_saml_outstanding_queries"] == {authn_id: "/next"}
 
-    def test_Saml_authenticate_no_idp(self):
+    def test_Saml_authenticate_no_idp_configured(self, flask_app):
         # modifying config in this test, make copy so as not to effect
         # following tests.
         tmp_sp_config = copy.deepcopy(sp_config)
         # test using binding method not configured for in IdP metadata
-        with self.app.test_request_context('/',
-                method='GET'):
+        with flask_app.test_request_context("/", method="GET"):
             sp = auth.Saml(tmp_sp_config)
-            try:
-                sp.authenticate(next_url='/next',
-                    binding=BINDING_HTTP_POST)
-                self.fail(
-                    'Expected UnsupportedBinding on invalid Saml authentication')
-            except UnsupportedBinding, e:
-                self.assertEqual(
-                    'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST', str(e))
+            with pytest.raises(
+                UnsupportedBinding,
+                match="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST",
+            ):
+                sp.authenticate(next_url="/next", binding=BINDING_HTTP_POST)
+
+    def test_Saml_authenticate_no_idp_allowed(self, flask_app):
+        # modifying config in this test, make copy so as not to effect
+        # following tests.
+        tmp_sp_config = copy.deepcopy(sp_config)
         # test with only allowed IdP not included in metadata file
-        with self.app.test_request_context('/',
-                method='GET'):
-            tmp_sp_config['metadata'] = {}
+        with flask_app.test_request_context("/", method="GET"):
+            tmp_sp_config["metadata"] = {}
             sp = auth.Saml(tmp_sp_config)
-            try:
-                sp.authenticate(next_url='/next')
-                self.fail(
-                    "Expected AuthException on invalid Saml authentication")
-            except auth.AuthException, e:
-                self.assertEqual(
-                    'Unable to locate valid IdP for this request', str(e))
+            with pytest.raises(
+                auth.AuthException, match="Unable to locate valid IdP for this request"
+            ):
+                sp.authenticate(next_url="/next")
 
-    def test_Saml_authenticate_multiple_idps(self):
+    def test_Saml_authenticate_multiple_idps(self, flask_app):
         tmp_sp_config = copy.deepcopy(sp_config)
-        entity_id = 'https://sso-alt.example.com/idp/metadata'
-        tmp_sp_config['metadata']['inline_dict'] = [{
-            'entityid': entity_id,
-            'service': {
-                'idp': {
-                    'name': 'Test Identity Provider',
-                    'endpoints': {
-                        'single_sign_on_service': [(
-                            'https://sso.example.com/idp/sso',
-                            BINDING_HTTP_REDIRECT)],
-                        'single_logout_service': [(
-                            'https://sso.example.com/idp/slo',
-                            BINDING_HTTP_REDIRECT)],
+        entity_id = "https://sso-alt.example.com/idp/metadata"
+        tmp_sp_config["metadata"]["inline_dict"] = [
+            {
+                "entityid": entity_id,
+                "service": {
+                    "idp": {
+                        "name": "Test Identity Provider",
+                        "endpoints": {
+                            "single_sign_on_service": [
+                                (
+                                    "https://sso-alt.example.com/idp/sso",
+                                    BINDING_HTTP_REDIRECT,
+                                )
+                            ],
+                            "single_logout_service": [
+                                (
+                                    "https://sso-alt.example.com/idp/slo",
+                                    BINDING_HTTP_REDIRECT,
+                                )
+                            ],
+                        },
                     },
                 },
-            },
-            'cert_file': root_path + '/sso_public.crt',
-        }]
+                "cert_file": root_path + "/sso_public.crt",
+            }
+        ]
         # Remove default idp form SP config.
-        del tmp_sp_config['service']['sp']['idp']
-        with self.app.test_request_context('/',
-                method='GET'):
+        del tmp_sp_config["service"]["sp"]["idp"]
+        with flask_app.test_request_context("/", method="GET"):
             sp = auth.Saml(tmp_sp_config)
-            self.assertEqual(None, sp._config.getattr('idp'))
-            resp = sp.authenticate(next_url='/next')
-            self.assertEqual(resp.status_code, 302)
-            url = urlparse.urlparse(resp.headers['Location'])
-            self.assertEqual(url.hostname, 'ds.example.com')
-            self.assertEqual(url.path, '/disco')
+            assert None == sp._config.getattr("idp")
+            resp = sp.authenticate(next_url="/next")
+            assert resp.status_code == 302
+            url = urlparse.urlparse(resp.headers["Location"])
+            assert url.hostname == "ds.example.com"
+            assert url.path == "/disco"
             params = urlparse.parse_qs(url.query)
-            self.assertEqual(tmp_sp_config['entityid'], params['entityID'][0])
-            self.assertEqual(
-                'https://foo.example.com/sp/disco_resp?session_id=',
-                params['return'][0][:49])
+            assert tmp_sp_config["entityid"] == params["entityID"][0]
+            assert (
+                "https://foo.example.com/sp/disco_resp?session_id="
+                == params["return"][0][:49]
+            )
 
-    def test_Saml_authenticate_multiple_idps_with_idp_default(self):
+    def test_Saml_authenticate_multiple_idps_with_idp_default(self, flask_app):
         tmp_sp_config = copy.deepcopy(sp_config)
-        entity_id = 'https://sso-alt.example.com/idp/metadata'
-        tmp_sp_config['metadata']['inline_dict'] = [{
-            'entityid': entity_id,
-            'service': {
-                'idp': {
-                    'name': 'Test Identity Provider',
-                    'endpoints': {
-                        'single_sign_on_service': [(
-                            'https://sso.example.com/idp/sso',
-                            BINDING_HTTP_REDIRECT)],
-                        'single_logout_service': [(
-                            'https://sso.example.com/idp/slo',
-                            BINDING_HTTP_REDIRECT)],
+        entity_id = "https://sso-alt.example.com/idp/metadata"
+        tmp_sp_config["metadata"]["inline_dict"] = [
+            {
+                "entityid": entity_id,
+                "service": {
+                    "idp": {
+                        "name": "Test Identity Provider",
+                        "endpoints": {
+                            "single_sign_on_service": [
+                                (
+                                    "https://sso-alt.example.com/idp/sso",
+                                    BINDING_HTTP_REDIRECT,
+                                )
+                            ],
+                            "single_logout_service": [
+                                (
+                                    "https://sso-alt.example.com/idp/slo",
+                                    BINDING_HTTP_REDIRECT,
+                                )
+                            ],
+                        },
                     },
                 },
-            },
-            'cert_file': root_path + '/sso_public.crt',
-        }]
-        with self.app.test_request_context('/',
-                method='GET'):
+                "cert_file": root_path + "/sso_public.crt",
+            }
+        ]
+        with flask_app.test_request_context("/", method="GET"):
             sp = auth.Saml(tmp_sp_config)
-            resp = sp.authenticate(next_url='/next')
-            self.assertEqual(resp.status_code, 302)
-            self.assert_('SAMLRequest' in resp.headers['Location'])
-            url = urlparse.urlparse(resp.headers['Location'])
-            self.assertEqual(url.hostname, 'sso.example.com')
-            self.assertEqual(url.path, '/idp/sso')
+            resp = sp.authenticate(next_url="/next")
+            assert resp.status_code == 302
+            assert "SAMLRequest" in resp.headers["Location"]
+            url = urlparse.urlparse(resp.headers["Location"])
+            assert url.hostname == "sso.example.com"
+            assert url.path == "/idp/sso"
             params = urlparse.parse_qs(url.query)
-            self.assert_('SAMLRequest' in params)
-            self.assertEqual(params['RelayState'], ['/next'])
+            assert "SAMLRequest" in params
+            assert params["RelayState"] == ["/next"]
 
-    def test_Saml_authenticate_required_missing_key_file(self):
+    def test_Saml_authenticate_required_missing_key_file(self, flask_app):
         # modifying config in this test, make copy so as not to effect
         # following tests.
         tmp_sp_config = copy.deepcopy(sp_config)
         # test signed authentication request w/o private key file
-        with self.app.test_request_context('/',
-                method='GET'):
-            tmp_sp_config['key_file'] = None
+        with flask_app.test_request_context("/", method="GET"):
+            tmp_sp_config["key_file"] = None
             sp = auth.Saml(tmp_sp_config)
-            try:
-                sp.authenticate(next_url='/next')
-                self.fail(
-                    'Expected AuthException on invalid Saml authentication')
-            except auth.AuthException, e:
-                self.assertEqual(
-                    'Signature requested for this Saml authentication request,'
-                    ' but no private key file configured', str(e))
+            with pytest.raises(
+                auth.AuthException,
+                match="Signature requested for this Saml authentication request, but no private key file configured",
+            ):
+                sp.authenticate(next_url="/next")
             # outstanding queury cache should still be empty
-            self.assertEqual(session.get('_saml_outstanding_queries',{}), {})
+            assert session.get("_saml_outstanding_queries", {}) == {}
 
-    def test_Saml_handle_discovery_response(self):
-        session_id = 'a0123456789abcdef0123456789abcdef'
+
+class TestSamlHandleDiscovery:
+    def test_Saml_handle_discovery_response(self, flask_app):
+        session_id = "a0123456789abcdef0123456789abcdef"
         tmp_sp_config = copy.deepcopy(sp_config)
-        entity_id = 'https://sso-alt.example.com/idp/metadata'
-        tmp_sp_config['metadata']['inline_dict'] = [{
-            'entityid': entity_id,
-            'service': {
-                'idp': {
-                    'name': 'Test Identity Provider',
-                    'endpoints': {
-                        'single_sign_on_service': [(
-                            'https://sso-alt.example.com/idp/sso',
-                            BINDING_HTTP_REDIRECT)],
-                        'single_logout_service': [(
-                            'https://sso-alt.example.com/idp/slo',
-                            BINDING_HTTP_REDIRECT)],
+        entity_id = "https://sso-alt.example.com/idp/metadata"
+        tmp_sp_config["metadata"]["inline_dict"] = [
+            {
+                "entityid": entity_id,
+                "service": {
+                    "idp": {
+                        "name": "Test Identity Provider",
+                        "endpoints": {
+                            "single_sign_on_service": [
+                                (
+                                    "https://sso-alt.example.com/idp/sso",
+                                    BINDING_HTTP_REDIRECT,
+                                )
+                            ],
+                            "single_logout_service": [
+                                (
+                                    "https://sso-alt.example.com/idp/slo",
+                                    BINDING_HTTP_REDIRECT,
+                                )
+                            ],
+                        },
                     },
                 },
-            },
-            'cert_file': root_path + '/sso_public.crt',
-        }]
-        # Remove default idp form SP config.
-        del tmp_sp_config['service']['sp']['idp']
-        with self.app.test_request_context('/',
-                method='GET', query_string=dict(
-                    session_id=session_id, entityID=entity_id
-                )):
+                "cert_file": root_path + "/sso_public.crt",
+            }
+        ]
+        # Remove default idp from SP config.
+        del tmp_sp_config["service"]["sp"]["idp"]
+        with flask_app.test_request_context(
+            "/",
+            method="GET",
+            query_string={"session_id": session_id, "entityID": entity_id},
+        ):
             # make the client thing there is outstanding request
-            session['_saml_outstanding_queries'] = {session_id: '/next'}
+            session["_saml_outstanding_queries"] = {session_id: "/next"}
             sp = auth.Saml(tmp_sp_config)
-            self.assertEqual(None, sp._config.getattr('idp'))
+            assert None == sp._config.getattr("idp")
             resp = sp.handle_discovery_response(request)
-            self.assertEqual(resp.status_code, 302)
-            self.assert_('SAMLRequest' in resp.headers['Location'])
-            url = urlparse.urlparse(resp.headers['Location'])
-            self.assertEqual(url.hostname, 'sso-alt.example.com')
-            self.assertEqual(url.path, '/idp/sso')
+            assert resp.status_code == 302
+            assert "SAMLRequest" in resp.headers["Location"]
+            url = urlparse.urlparse(resp.headers["Location"])
+            assert url.hostname == "sso-alt.example.com"
+            assert url.path == "/idp/sso"
             params = urlparse.parse_qs(url.query)
-            self.assert_('SAMLRequest' in params)
-            self.assertEqual(params['RelayState'], ['/next'])
+            assert "SAMLRequest" in params
+            assert params["RelayState"] == ["/next"]
 
-    def test_Saml_handle_assertion(self):
-        ava = {'uid': '123456'}
-        session_id = 'a0123456789abcdef0123456789abcdef'
+
+class TestSamlHandleAssertion:
+    def test_Saml_handle_assertion(self, flask_app):
+        ava = {"uid": "123456"}
+        session_id = "a0123456789abcdef0123456789abcdef"
+        # modifying config in this test, make copy so as not to effect
+        # following tests.
+        tmp_sp_config = copy.deepcopy(sp_config)
+        # create a response to assert upon
+        _name_id, authn_response = create_authn_response(session_id, ava)
+        assert b"Signature" in authn_response
+        # test fails if there is no known outstanding auth request
+        with flask_app.test_request_context(
+            "/",
+            method="POST",
+            data={
+                "SAMLResponse": base64.b64encode(authn_response),
+                "RelayState": "/next",
+            },
+        ):
+            sp = auth.Saml(tmp_sp_config)
+            with pytest.raises(Exception):
+                sp.handle_assertion(request)
+
+    def test_Saml_handle_assertion_with_default_user_mappings(self, flask_app):
+        ava = {"uid": "123456"}
+        session_id = "a0123456789abcdef0123456789abcdef"
         # modifying config in this test, make copy so as not to effect
         # following tests.
         tmp_sp_config = copy.deepcopy(sp_config)
         # create a response to assert upon
         name_id, authn_response = create_authn_response(session_id, ava)
-        self.assert_('Signature' in authn_response)
-        # test fails if there is no known outstanding auth request
-        with self.app.test_request_context('/',
-                method='POST',
-                data=dict(SAMLResponse=base64.b64encode(authn_response),
-                    RelayState='/next')):
-            sp = auth.Saml(tmp_sp_config)
-            try:
-                sp.handle_assertion(request)
-                self.fail(
-                    'Expected Exception due to lack of outstanding request')
-            except:
-                pass
         # test with default user_id mapping
-        with self.app.test_request_context('/',
-                method='POST',
-                data=dict(SAMLResponse=base64.b64encode(authn_response),
-                    RelayState='/next')):
+        with flask_app.test_request_context(
+            "/",
+            method="POST",
+            data={
+                "SAMLResponse": base64.b64encode(authn_response),
+                "RelayState": "/next",
+            },
+        ):
             # make the client thing there is outstanding request
-            session['_saml_outstanding_queries'] = {session_id: '/next'}
+            session["_saml_outstanding_queries"] = {session_id: "/next"}
+            sp = auth.Saml(tmp_sp_config)
             user_attributes, resp = sp.handle_assertion(request)
-            self.assertEqual(user_attributes['name_id'][0], name_id)
-            self.assertEqual(user_attributes['uid'][0], '123456')
-            self.assertEqual(resp.status_code, 302)
-            self.assertEqual(resp.headers['Location'], '/next')
+            assert user_attributes["name_id"][0] == name_id
+            assert user_attributes["uid"][0] == "123456"
+            assert resp.status_code == 302
+            assert resp.headers["Location"] == "/next"
             # outstanding queury cache should now be empty
-            self.assertEqual(session.get('_saml_outstanding_queries',{}), {})
+            assert session.get("_saml_outstanding_queries", {}) == {}
             # identity and subject_id should now be set
-            self.assertEqual(session.get('_saml_subject_id').text, name_id)
+            assert session.get("_saml_subject_id").text == name_id
 
-    def test_Saml_handle_assertion_encrypted(self):
-        self.skipTest("Encryption in pysaml2 2.0.0 is possibly broken." + \
-                      " If not, I don't know how to get it not blow up.")
-        ava = {'uid': '123456'}
-        session_id = 'a0123456789abcdef0123456789abcdef'
+    @pytest.mark.skip(
+        reason="Encryption in pysaml2 2.0.0 is possibly broken. If not, I don't know how to get it not blow up."
+    )
+    def test_Saml_handle_assertion_encrypted(self, flask_app):
+        ava = {"uid": "123456"}
+        session_id = "a0123456789abcdef0123456789abcdef"
         # modifying config in this test, make copy so as not to effect
         # following tests.
-        tmp_sp_config = copy.deepcopy(sp_config)
+        copy.deepcopy(sp_config)
         # create a response to assert upon
-        name_id, authn_response = create_authn_response(session_id, ava,
-                encrypt_assertion=True)
+        _name_id, _authn_response = create_authn_response(
+            session_id, ava, encrypt_assertion=True
+        )
 
-    def test_Saml_handle_assertion_allow_unsolicited(self):
-        ava = {'uid': '123456'}
-        session_id = 'a0123456789abcdef0123456789abcdef'
+    def test_Saml_handle_assertion_allow_unsolicited_without_outstanding_queries(
+        self, flask_app
+    ):
+        ava = {"uid": "123456"}
+        session_id = "a0123456789abcdef0123456789abcdef"
         # modifying config in this test, make copy so as not to effect
         # following tests.
         tmp_sp_config = copy.deepcopy(sp_config)
         # The following setting allows for handling unsolicited
         # assertions which ironically is the expected behavior according to
         # the SAML 2.0 specification
-        tmp_sp_config['service']['sp']['allow_unsolicited'] = 'true'
+        tmp_sp_config["service"]["sp"]["allow_unsolicited"] = "true"
         # create a response to assert upon
         name_id, authn_response = create_authn_response(session_id, ava)
-        self.assert_('Signature' in authn_response)
+        assert b"Signature" in authn_response
         # test success if no outstanding queries exist
-        with self.app.test_request_context('/',
-                method='POST',
-                data=dict(SAMLResponse=base64.b64encode(authn_response),
-                    RelayState='/next')):
+        with flask_app.test_request_context(
+            "/",
+            method="POST",
+            data={
+                "SAMLResponse": base64.b64encode(authn_response),
+                "RelayState": "/next",
+            },
+        ):
             sp = auth.Saml(tmp_sp_config)
             user_attributes, resp = sp.handle_assertion(request)
-            self.assertEqual(user_attributes['name_id'][0], name_id)
-            self.assertEqual(resp.status_code, 302)
-            self.assertEqual(resp.headers['Location'], '/next')
+            assert user_attributes["name_id"][0] == name_id
+            assert resp.status_code == 302
+            assert resp.headers["Location"] == "/next"
             # identity and subject_id should now be set
-            self.assert_(name_id in session.get('_saml_identity').keys()[0])
-            self.assertEqual(session.get('_saml_subject_id').text, name_id)
-        # test success if outstanding queries exist
-        with self.app.test_request_context('/',
-                method='POST',
-                data=dict(SAMLResponse=base64.b64encode(authn_response),
-                    RelayState='/next')):
-            sp = auth.Saml(tmp_sp_config)
-            session['_saml_outstanding_queries'] = {session_id: '/next'}
-            user_attributes, resp = sp.handle_assertion(request)
-            self.assertEqual(user_attributes['name_id'][0], name_id)
-            self.assertEqual(resp.status_code, 302)
-            self.assertEqual(resp.headers['Location'], '/next')
-            # outstanding queury cache should now be empty
-            self.assertEqual(session.get('_saml_outstanding_queries',{}), {})
-            # identity and subject_id should now be set
-            self.assert_(name_id in session.get('_saml_identity').keys()[0])
-            self.assertEqual(session.get('_saml_subject_id').text, name_id)
+            assert name_id in next(iter(session.get("_saml_identity", {}).keys()))
+            assert session.get("_saml_subject_id").text == name_id
 
-    def test_Saml_handle_assertion_invalid_SAMLResponse(self):
-        ava = {'uid': '123456'}
-        session_id = 'a0123456789abcdef0123456789abcdef'
+    def test_Saml_handle_assertion_allow_unsolicited_with_outstanding_queries(
+        self, flask_app
+    ):
+        ava = {"uid": "123456"}
+        session_id = "a0123456789abcdef0123456789abcdef"
+        # modifying config in this test, make copy so as not to effect
+        # following tests.
+        tmp_sp_config = copy.deepcopy(sp_config)
+        # The following setting allows for handling unsolicited
+        # assertions which ironically is the expected behavior according to
+        # the SAML 2.0 specification
+        tmp_sp_config["service"]["sp"]["allow_unsolicited"] = "true"
+        # create a response to assert upon
+        name_id, authn_response = create_authn_response(session_id, ava)
+        # test success if outstanding queries exist
+        with flask_app.test_request_context(
+            "/",
+            method="POST",
+            data={
+                "SAMLResponse": base64.b64encode(authn_response),
+                "RelayState": "/next",
+            },
+        ):
+            sp = auth.Saml(tmp_sp_config)
+            session["_saml_outstanding_queries"] = {session_id: "/next"}
+            user_attributes, resp = sp.handle_assertion(request)
+            assert user_attributes["name_id"][0] == name_id
+            assert resp.status_code == 302
+            assert resp.headers["Location"] == "/next"
+            # outstanding queury cache should now be empty
+            assert session.get("_saml_outstanding_queries", {}) == {}
+            # identity and subject_id should now be set
+            assert name_id in next(iter(session.get("_saml_identity", {}).keys()))
+            assert session.get("_saml_subject_id").text == name_id
+
+    def test_Saml_handle_assertion_missing_SAMLResponse(self, flask_app):
         # modifying config in this test, make copy so as not to effect
         # following tests.
         tmp_sp_config = copy.deepcopy(sp_config)
         # test missing SAMLResponse
-        with self.app.test_request_context('/',
-                method='POST'):
+        with flask_app.test_request_context("/", method="POST"):
             sp = auth.Saml(tmp_sp_config)
-            try:
+            with pytest.raises(BadRequest) as exc_info:
                 sp.handle_assertion(request)
-                self.fail(
-                    'Expected BadRequest on missing SAMLResponse POST var')
-            except BadRequest, e:
-                self.assertEqual(400, e.code)
-                self.assertEqual('SAMLResponse missing from POST', e.description)
-        # test SAMLResponse via GET
-        with self.app.test_request_context('/',
-                method='GET',
-                query_string=dict(SAMLResponse='invalid', RelayState='/next')):
-            sp = auth.Saml(tmp_sp_config)
-            try:
-                sp.handle_assertion(request)
-                self.fail(
-                    'Expected BadRequest on missing SAMLResponse POST var')
-            except BadRequest, e:
-                self.assertEqual(400, e.code)
-                self.assertEqual('SAMLResponse missing from POST', e.description)
-        # test invalid SAMLResponse
-        with self.app.test_request_context('/',
-                method='POST',
-                data=dict(SAMLResponse='invalid', RelayState='/next')):
-            sp = auth.Saml(tmp_sp_config)
-            try:
-                sp.handle_assertion(request)
-                self.fail(
-                    'Expected BadRequest on invalid SAMLResponse POST var')
-            except BadRequest, e:
-                self.assertEqual(400, e.code)
-                self.assertEqual('SAML response is invalid', e.description)
-        # test on unsigned SAMLResponse when signing is required
-        # create a response to assert upon
-        name_id, authn_response = create_authn_response(session_id, ava,
-                                      sign_response=False, sign_assertion=False)
-        self.assertNotIn('Signature', authn_response)
-        with self.app.test_request_context('/',
-                method='POST',
-                data=dict(SAMLResponse=base64.b64encode(authn_response),
-                    RelayState='/next')):
-            sp = auth.Saml(tmp_sp_config)
-            # test fails if there is no known outstanding auth request
-            try:
-                sp.handle_assertion(request)
-                self.fail(
-                    'Expected Exception due to lack of outstanding request')
-            except:
-                pass
-            # make the client thing there is outstanding request
-            session['_saml_outstanding_queries'] = {session_id: '/next'}
-            # test fails if there is not a missing signature
-            try:
-                user_attributes, resp = sp.handle_assertion(request)
-                self.fail(
-                    'Expected SignatureError: Signature missing for assertion')
-            except SignatureError, e:
-                self.assertEqual('Signature missing for assertion', str(e))
+            assert 400 == exc_info.value.code
+            assert "SAMLResponse missing from POST" == exc_info.value.description
 
-    def test_Saml_logout(self):
-        not_on_or_after = int(time.time()) + 3600
-        identity = {'4=id-1': {
-            'https://sso.example.com/idp/metadata': (
-                not_on_or_after, {
-                    'authn_info': [],
-                    'name_id': 'id-1',
-                    'not_on_or_after': not_on_or_after,
-                    'came_from': '/next',
-                    'ava': {'uid': ['123456']}
-                }
-            )
-        }}
+    def test_Saml_handle_assertion_invalid_SAMLResponse_get(self, flask_app):
         # modifying config in this test, make copy so as not to effect
         # following tests.
         tmp_sp_config = copy.deepcopy(sp_config)
-        with self.app.test_request_context('/',
-                method='GET'):
+        # test SAMLResponse via GET
+        with flask_app.test_request_context(
+            "/",
+            method="GET",
+            query_string={"SAMLResponse": "invalid", "RelayState": "/next"},
+        ):
             sp = auth.Saml(tmp_sp_config)
-            # first need to be logged in, let's pretend
-            session['_saml_identity'] = identity
-            session['_saml_subject_id'] = saml.NameID(text='id-1')
-            resp = sp.logout(next_url='/next')
-            self.assertEqual(resp.status_code, 302)
-            self.assert_("SAMLRequest" in resp.headers['Location'])
-            url = urlparse.urlparse(resp.headers['Location'])
-            self.assertEqual(url.hostname, 'sso.example.com')
-            self.assertEqual(url.path, '/idp/slo')
-            params = urlparse.parse_qs(url.query)
-            self.assert_('Signature' in params)
-            self.assert_('SigAlg' in params)
-            self.assert_('SAMLRequest' in params)
-            logout = samlp.logout_request_from_string(
-                decode_base64_and_inflate(params['SAMLRequest'][0]))
-            self.assertEqual(logout.destination,
-                'https://sso.example.com/idp/slo')
-            self.assertEqual(logout.name_id.text, 'id-1')
-            # check the caches still contain data
-            self.assertEqual(session['_saml_identity'], identity)
-            self.assertEqual(session['_saml_subject_id'].text, 'id-1')
-            # verify state cache
-            self.assert_(logout.id in session['_saml_state'])
-            self.assertEqual(session['_saml_state'][logout.id]['entity_id'],
-                'https://sso.example.com/idp/metadata')
-            self.assertEqual(session['_saml_state'][logout.id]['entity_ids'],
-                ['https://sso.example.com/idp/metadata'])
-            self.assertEqual(session['_saml_state'][logout.id]['operation'],
-                'SLO')
-            # name_id is now being coded/decoded
-            self.assertEqual(session['_saml_state'][logout.id]['name_id'],
-                '4=id-1')
-            self.assertEqual(session['_saml_state'][logout.id]['reason'],
-                '')
-            self.assertTrue(session['_saml_state'][logout.id]['sign'])
-        # test unsigned logout request
-        with self.app.test_request_context('/',
-                method='GET'):
-            tmp_sp_config['service']['sp']['logout_requests_signed'] = False
-            sp = auth.Saml(tmp_sp_config)
-            # first need to be logged in, let's pretend
-            session['_saml_identity'] = identity
-            session['_saml_subject_id'] = saml.NameID(text='id-1')
-            resp = sp.logout(next_url='/next')
-            self.assertEqual(resp.status_code, 302)
-            self.assert_("SAMLRequest" in resp.headers['Location'])
-            url = urlparse.urlparse(resp.headers['Location'])
-            params = urlparse.parse_qs(url.query)
-            self.assert_('SAMLRequest' in params)
-            logout = samlp.logout_request_from_string(
-                decode_base64_and_inflate(params['SAMLRequest'][0]))
-            self.assertIsNone(logout.signature)
-            # verify state cache shows signing off
-            self.assertFalse(session['_saml_state'][logout.id]['sign'])
+            with pytest.raises(BadRequest) as exc_info:
+                sp.handle_assertion(request)
+            assert 400 == exc_info.value.code
+            assert "SAMLResponse missing from POST" == exc_info.value.description
 
-    def test_Saml_logout_via_post(self):
+    def test_Saml_handle_assertion_invalid_SAMLResponse_post(self, flask_app):
+        # modifying config in this test, make copy so as not to effect
+        # following tests.
+        tmp_sp_config = copy.deepcopy(sp_config)
+        # test invalid SAMLResponse
+        with flask_app.test_request_context(
+            "/", method="POST", data={"SAMLResponse": "invalid", "RelayState": "/next"}
+        ):
+            sp = auth.Saml(tmp_sp_config)
+            with pytest.raises(BadRequest) as exc_info:
+                sp.handle_assertion(request)
+            assert 400 == exc_info.value.code
+            assert "SAML response is invalid" == exc_info.value.description
+
+    def test_Saml_handle_assertion_invalid_SAMLResponse_signing_required(
+        self, flask_app
+    ):
+        ava = {"uid": "123456"}
+        session_id = "a0123456789abcdef0123456789abcdef"
+        # modifying config in this test, make copy so as not to effect
+        # following tests.
+        tmp_sp_config = copy.deepcopy(sp_config)
+        # test on unsigned SAMLResponse when signing is required
+        # create a response to assert upon
+        _name_id, authn_response = create_authn_response(
+            session_id, ava, sign_response=False, sign_assertion=False
+        )
+        assert b"Signature" not in authn_response
+        with flask_app.test_request_context(
+            "/",
+            method="POST",
+            data={
+                "SAMLResponse": base64.b64encode(authn_response),
+                "RelayState": "/next",
+            },
+        ):
+            sp = auth.Saml(tmp_sp_config)
+            # test fails if there is no known outstanding auth request
+            with pytest.raises(Exception):
+                sp.handle_assertion(request)
+            # make the client thing there is outstanding request
+            session["_saml_outstanding_queries"] = {session_id: "/next"}
+            # test fails if there is not a missing signature
+            with pytest.raises(SignatureError, match="Signature missing for response"):
+                _user_attributes, _resp = sp.handle_assertion(request)
+
+
+class TestSamlLogout:
+    @pytest.fixture
+    def identity_get(self):
         not_on_or_after = int(time.time()) + 3600
-        identity = {'4=id-1': {
-            'https://sso.example.com/idp/metadata': (
-                not_on_or_after, {
-                    'authn_info': [('urn:oasis:names:tc:SAML:2.0:ac:classes:Password', [])],
-                    'name_id': saml.NameID(text='id-1'),
-                    'not_on_or_after': not_on_or_after,
-                    'came_from': '/next',
-                    'ava': {'uid': ['a123456']}
-                }
+        return {
+            "4=id-1": {
+                "https://sso.example.com/idp/metadata": (
+                    not_on_or_after,
+                    {
+                        "authn_info": [],
+                        "name_id": "id-1",
+                        "not_on_or_after": not_on_or_after,
+                        "came_from": "/next",
+                        "ava": {"uid": ["123456"]},
+                    },
+                )
+            }
+        }
+
+    @pytest.fixture
+    def identity_post(self):
+        not_on_or_after = int(time.time()) + 3600
+        return {
+            "4=id-1": {
+                "https://sso.example.com/idp/metadata": (
+                    not_on_or_after,
+                    {
+                        "authn_info": [
+                            ("urn:oasis:names:tc:SAML:2.0:ac:classes:Password", [])
+                        ],
+                        "name_id": saml.NameID(text="id-1"),
+                        "not_on_or_after": not_on_or_after,
+                        "came_from": "/next",
+                        "ava": {"uid": ["a123456"]},
+                    },
+                )
+            }
+        }
+
+    def test_Saml_logout_signed(self, flask_app, identity_get):
+        # modifying config in this test, make copy so as not to effect
+        # following tests.
+        tmp_sp_config = copy.deepcopy(sp_config)
+        with flask_app.test_request_context("/", method="GET"):
+            sp = auth.Saml(tmp_sp_config)
+            # first need to be logged in, let's pretend
+            session["_saml_identity"] = identity_get
+            session["_saml_subject_id"] = saml.NameID(text="id-1")
+            resp = sp.logout(next_url="/next")
+            assert resp.status_code == 302
+            assert "SAMLRequest" in resp.headers["Location"]
+            url = urlparse.urlparse(resp.headers["Location"])
+            assert url.hostname == "sso.example.com"
+            assert url.path == "/idp/slo"
+            params = urlparse.parse_qs(url.query)
+            assert "Signature" in params
+            assert "SigAlg" in params
+            assert "SAMLRequest" in params
+            logout = samlp.logout_request_from_string(
+                decode_base64_and_inflate(params["SAMLRequest"][0])
             )
-        }}
+            assert logout.destination == "https://sso.example.com/idp/slo"
+            assert logout.name_id.text == "id-1"
+            # check the caches still contain data
+            assert session["_saml_identity"] == identity_get
+            assert session["_saml_subject_id"].text == "id-1"
+            # verify state cache
+            assert logout.id in session["_saml_state"]
+            assert (
+                session["_saml_state"][logout.id]["entity_id"]
+                == "https://sso.example.com/idp/metadata"
+            )
+            assert session["_saml_state"][logout.id]["entity_ids"] == [
+                "https://sso.example.com/idp/metadata"
+            ]
+            assert session["_saml_state"][logout.id]["operation"] == "SLO"
+            # name_id is now being coded/decoded
+            assert session["_saml_state"][logout.id]["name_id"] == "4=id-1"
+            assert session["_saml_state"][logout.id]["reason"] == ""
+            assert session["_saml_state"][logout.id]["sign"] is True
+
+    def test_Saml_logout_unsigned(self, flask_app, identity_get):
+        # modifying config in this test, make copy so as not to effect
+        # following tests.
+        tmp_sp_config = copy.deepcopy(sp_config)
+        # test unsigned logout request
+        with flask_app.test_request_context("/", method="GET"):
+            tmp_sp_config["service"]["sp"]["logout_requests_signed"] = False
+            sp = auth.Saml(tmp_sp_config)
+            # first need to be logged in, let's pretend
+            session["_saml_identity"] = identity_get
+            session["_saml_subject_id"] = saml.NameID(text="id-1")
+            resp = sp.logout(next_url="/next")
+            assert resp.status_code == 302
+            assert "SAMLRequest" in resp.headers["Location"]
+            url = urlparse.urlparse(resp.headers["Location"])
+            params = urlparse.parse_qs(url.query)
+            assert "SAMLRequest" in params
+            logout = samlp.logout_request_from_string(
+                decode_base64_and_inflate(params["SAMLRequest"][0])
+            )
+            assert logout.signature is None
+            # verify state cache shows signing off
+            assert session["_saml_state"][logout.id]["sign"] is False
+
+    def test_Saml_logout_via_post(self, flask_app, identity_post):
         # modifying config in this test, make copy so as not to effect
         # following tests.
         tmp_sp_config = copy.deepcopy(sp_config)
         # test signed authentication request
-        with self.app.test_request_context('/',
-                method='GET'):
-            tmp_sp_config['metadata'] = {
-                'local': [root_path + '/idp_post_metadata.xml']
+        with flask_app.test_request_context("/", method="GET"):
+            tmp_sp_config["metadata"] = {
+                "local": [root_path + "/idp_post_metadata.xml"]
             }
             sp = auth.Saml(tmp_sp_config)
             # first need to be logged in, let's pretend
-            session['_saml_identity'] = identity
-            session['_saml_subject_id'] = saml.NameID(text='id-1')
-            resp, status = sp.logout(next_url='/next')
-            self.assertEqual(status, 200)
-            _form = unpack_form(resp['data'][3])
-            self.assert_('SAMLRequest' in _form)
-            self.assert_('RelayState' in _form)
+            session["_saml_identity"] = identity_post
+            session["_saml_subject_id"] = saml.NameID(text="id-1")
+            resp, status = sp.logout(next_url="/next")
+            assert status == 200
+            _form = unpack_form(resp["data"][3])
+            assert "SAMLRequest" in _form
+            assert "RelayState" in _form
 
-    def test_Saml_logout_not_logged_in(self):
+    def test_Saml_logout_not_logged_in(self, flask_app):
         # modifying config in this test, make copy so as not to effect
         # following tests.
         tmp_sp_config = copy.deepcopy(sp_config)
-        with self.app.test_request_context('/',
-                method='GET'):
+        with flask_app.test_request_context("/", method="GET"):
             sp = auth.Saml(tmp_sp_config)
-            try:
-                sp.logout(next_url='/next')
-                self.fail('Expected AuthException on attempted logout when'
-                    ' not logged in')
-            except auth.AuthException, e:
-                self.assertEqual(
-                    'Unable to retrieve subject id for logout', str(e))
+            with pytest.raises(
+                auth.AuthException, match="Unable to retrieve subject id for logout"
+            ):
+                sp.logout(next_url="/next")
 
-    def test_Saml_logout_required_missing_key_file(self):
-        not_on_or_after = int(time.time()) + 3600
-        identity = {'4=id-1': {
-            'https://sso.example.com/idp/metadata': (
-                not_on_or_after, {
-                    'authn_info': [],
-                    'name_id': 'id-1',
-                    'not_on_or_after': not_on_or_after,
-                    'came_from': '/next',
-                    'ava': {'uid': ['123456']}
-                }
-            )
-        }}
+    def test_Saml_logout_required_missing_key_file(self, flask_app, identity_get):
         # modifying config in this test, make copy so as not to effect
         # following tests.
         tmp_sp_config = copy.deepcopy(sp_config)
-        with self.app.test_request_context('/',
-                method='GET'):
-            tmp_sp_config['key_file'] = None
+        with flask_app.test_request_context("/", method="GET"):
+            tmp_sp_config["key_file"] = None
             sp = auth.Saml(tmp_sp_config)
             # first need to be logged in, let's pretend
-            session['_saml_identity'] = identity
-            session['_saml_subject_id'] = saml.NameID(text='id-1')
-            try:
-                sp.logout(next_url='/next')
-                self.fail(
-                    'Expected AuthException on invalid Saml logout request')
-            except SigverError, e:
-                self.assertEqual('Signing failed', str(e))
-            except auth.AuthException, e:
-                self.assertEqual(
-                    'Signature requested for this Saml logout request,'
-                    ' but no private key file configured', str(e))
+            session["_saml_identity"] = identity_get
+            session["_saml_subject_id"] = saml.NameID(text="id-1")
+            with pytest.raises(
+                auth.AuthException,
+                match="Signature requested for this Saml logout request, but no private key file configured",
+            ):
+                sp.logout(next_url="/next")
 
-    def test_Saml_handle_logout_response(self):
+
+class TestSamlHandleLogout:
+    @pytest.fixture
+    def resp_session_data(self):
         not_on_or_after = int(time.time()) + 3600
-        identity = {'4=id-1': {
-            'https://sso.example.com/idp/metadata': (
-                not_on_or_after, {
-                    'authn_info': [],
-                    'name_id': 'id-1',
-                    'not_on_or_after': not_on_or_after,
-                    'came_from': '/next',
-                    'ava': {'uid': ['123456']}
-                }
-            )
-        }}
-        state = {
-            'entity_ids': ['https://sso.example.com/idp/metadata'],
-            'subject_id': 'id-1',
-            #'return_to': '/next',
-            'name_id': '4=id-1',
-            'entity_id': 'https://sso.example.com/idp/metadata',
-            'not_on_or_after': not_on_or_after,
-            'operation': 'SLO',
-            'reason': '',
+        identity = {
+            "4=id-1": {
+                "https://sso.example.com/idp/metadata": (
+                    not_on_or_after,
+                    {
+                        "authn_info": [],
+                        "name_id": "id-1",
+                        "not_on_or_after": not_on_or_after,
+                        "came_from": "/next",
+                        "ava": {"uid": ["123456"]},
+                    },
+                )
+            }
         }
+        state = {
+            "entity_ids": ["https://sso.example.com/idp/metadata"],
+            "subject_id": "id-1",
+            #'return_to': '/next',
+            "name_id": "4=id-1",
+            "entity_id": "https://sso.example.com/idp/metadata",
+            "not_on_or_after": not_on_or_after,
+            "operation": "SLO",
+            "reason": "",
+        }
+        return identity, state
+
+    @pytest.fixture
+    def req_session_data(self):
+        not_on_or_after = int(time.time()) + 3600
+        identity = {
+            "4=id-1": {
+                "https://sso.example.com/idp/metadata": (
+                    not_on_or_after,
+                    {
+                        "authn_info": [
+                            ("urn:oasis:names:tc:SAML:2.0:ac:classes:Password", [])
+                        ],
+                        "name_id": saml.NameID(text="id-1"),
+                        "not_on_or_after": not_on_or_after,
+                        "came_from": "/next",
+                        "ava": {"uid": ["a123456"]},
+                    },
+                )
+            }
+        }
+        state = {
+            "entity_ids": ["https://sso.example.com/idp/metadata"],
+            "name_id": saml.NameID(text="id-1"),
+            "entity_id": "https://sso.example.com/idp/metadata",
+            "not_on_or_after": not_on_or_after,
+            "operation": "SLO",
+            "reason": "",
+            "sign": False,
+        }
+        return identity, state
+
+    def test_Saml_handle_logout_response_get(self, flask_app, resp_session_data):
         # modifying config in this test, make copy so as not to effect
         # following tests.
         tmp_sp_config = copy.deepcopy(sp_config)
         # create a response to assert upon
         sp = auth.Saml(tmp_sp_config)
-        session_id, logout_response = create_logout_response('id-1',
-            destination='https://sso.example.com/idp/slo',
-            issuer_entity_id='https://sso.example.com/idp/metadata',
-            req_entity_id='https://foo.example.com/sp/metadata')
-        self.assert_('Signature' in logout_response)
+        session_id, logout_response = create_logout_response(
+            "id-1",
+            destination="https://sso.example.com/idp/slo",
+            issuer_entity_id="https://sso.example.com/idp/metadata",
+            req_entity_id="https://foo.example.com/sp/metadata",
+        )
+        assert b"Signature" in logout_response
         # test SAMLResponse logout as GET
-        with self.app.test_request_context('/',
-                method='GET',
-                query_string=dict(
-                    SAMLResponse=deflate_and_base64_encode(logout_response),
-                    RelayState='/next')):
+        with flask_app.test_request_context(
+            "/",
+            method="GET",
+            query_string={
+                "SAMLResponse": deflate_and_base64_encode(logout_response),
+                "RelayState": "/next",
+            },
+        ):
             # first need to be logged in, let's pretend
-            session['_saml_identity'] = identity
-            session['_saml_subject_id'] = saml.NameID(text='id-1')
-            session['_saml_state'] = {session_id: state}
-            success, resp = sp.handle_logout(request, next_url='/next')
-            self.assertEqual(session.get('_saml_identity', None), {})
-            self.assertIsNone(session.get('_saml_subject_id', None))
-            self.assertEqual(session.get('_saml_state', None), {})
-            self.assertTrue(success)
-            self.assertEqual(resp.status_code, 302)
-            self.assertEqual(resp.headers['Location'], '/next')
-        # test SAMLResponse logout as POST
-        with self.app.test_request_context('/',
-                method='POST',
-                data=dict(
-                    SAMLResponse=base64.b64encode(logout_response),
-                    RelayState='/next')):
-            endpoints = tmp_sp_config['service']['sp']['endpoints']
-            slo = endpoints['single_logout_service'][0][0]
-            endpoints['single_logout_service'] = [(slo, BINDING_HTTP_POST)]
-            # first need to be logged in, let's pretend
-            session['_saml_identity'] = identity
-            session['_saml_subject_id'] = saml.NameID(text='id-1')
-            session['_saml_state'] = {session_id: state}
-            success, resp = sp.handle_logout(request, next_url='/next')
-            self.assertTrue(success)
-            self.assertEqual(resp.status_code, 302)
-            self.assertEqual(resp.headers['Location'], '/next')
+            session["_saml_identity"] = resp_session_data[0]
+            session["_saml_subject_id"] = saml.NameID(text="id-1")
+            session["_saml_state"] = {session_id: resp_session_data[1]}
+            success, resp = sp.handle_logout(request, next_url="/next")
+            assert session.get("_saml_identity", None) == {}
+            assert session.get("_saml_subject_id", None) is None
+            assert session.get("_saml_state", None) == {}
+            assert success is True
+            assert resp.status_code == 302
+            assert resp.headers["Location"] == "/next"
 
-    def test_Saml_handle_logout_request(self):
-        not_on_or_after = int(time.time()) + 3600
-        identity = {'4=id-1': {
-            'https://sso.example.com/idp/metadata': (
-                not_on_or_after, {
-                    'authn_info': [('urn:oasis:names:tc:SAML:2.0:ac:classes:Password', [])],
-                    'name_id': saml.NameID(text='id-1'),
-                    'not_on_or_after': not_on_or_after,
-                    'came_from': '/next',
-                    'ava': {'uid': ['a123456']}
-                }
-            )
-        }}
-        state = {
-            'entity_ids': ['https://sso.example.com/idp/metadata'],
-            'name_id': saml.NameID(text='id-1'),
-            'entity_id': 'https://sso.example.com/idp/metadata',
-            'not_on_or_after': not_on_or_after,
-            'operation': 'SLO',
-            'reason': '',
-            'sign': False,
-        }
+    def test_Saml_handle_logout_response_post(self, flask_app, resp_session_data):
+        # modifying config in this test, make copy so as not to effect
+        # following tests.
+        tmp_sp_config = copy.deepcopy(sp_config)
+        # create a response to assert upon
+        sp = auth.Saml(tmp_sp_config)
+        session_id, logout_response = create_logout_response(
+            "id-1",
+            destination="https://sso.example.com/idp/slo",
+            issuer_entity_id="https://sso.example.com/idp/metadata",
+            req_entity_id="https://foo.example.com/sp/metadata",
+        )
+        # test SAMLResponse logout as POST
+        with flask_app.test_request_context(
+            "/",
+            method="POST",
+            data={
+                "SAMLResponse": base64.b64encode(logout_response),
+                "RelayState": "/next",
+            },
+        ):
+            endpoints = tmp_sp_config["service"]["sp"]["endpoints"]
+            slo = endpoints["single_logout_service"][0][0]
+            endpoints["single_logout_service"] = [(slo, BINDING_HTTP_POST)]
+            # first need to be logged in, let's pretend
+            session["_saml_identity"] = resp_session_data[0]
+            session["_saml_subject_id"] = saml.NameID(text="id-1")
+            session["_saml_state"] = {session_id: resp_session_data[1]}
+            success, resp = sp.handle_logout(request, next_url="/next")
+            assert success is True
+            assert resp.status_code == 302
+            assert resp.headers["Location"] == "/next"
+
+    def test_Saml_handle_logout_request(self, flask_app, req_session_data):
         # modifying config in this test, make copy so as not to effect
         # following tests.
         tmp_sp_config = copy.deepcopy(sp_config)
         # create a response to assert upon
         sp = auth.Saml(tmp_sp_config)
         logout_request = create_logout_request(
-            subject_id='id-1',
-            destination='https://foo.example.com/sp/slo',
-            issuer_entity_id='https://sso.example.com/idp/metadata',
-            req_entity_id='https://sso.example.com/idp/metadata')
+            subject_id="id-1",
+            destination="https://foo.example.com/sp/slo",
+            issuer_entity_id="https://sso.example.com/idp/metadata",
+            req_entity_id="https://sso.example.com/idp/metadata",
+        )
         # test SAMLRequest logout
-        with self.app.test_request_context('/',
-                method='GET',
-                query_string=dict(
-                    SAMLRequest=deflate_and_base64_encode(str(logout_request)),
-                    RelayState=deflate_and_base64_encode(logout_request.id))):
+        with flask_app.test_request_context(
+            "/",
+            method="GET",
+            query_string={
+                "SAMLRequest": deflate_and_base64_encode(str(logout_request)),
+                "RelayState": deflate_and_base64_encode(logout_request.id),
+            },
+        ):
             # first need to be logged in, let's pretend
-            session['_saml_identity'] = identity
-            session['_saml_subject_id'] = saml.NameID(
-                name_qualifier='https://sso.example.com/idp/metadata',
-                text='id-1')
-            session['_saml_state'] = {'id-' + logout_request.id: state}
-            success, resp = sp.handle_logout(request, next_url='/next')
-            self.assertTrue(success)
-            self.assertEqual(resp.status_code, 302)
-            self.assert_("SAMLResponse" in resp.headers['Location'])
-            url = urlparse.urlparse(resp.headers['Location'])
+            session["_saml_identity"] = req_session_data[0]
+            session["_saml_subject_id"] = saml.NameID(
+                name_qualifier="https://sso.example.com/idp/metadata", text="id-1"
+            )
+            session["_saml_state"] = {"id-" + logout_request.id: req_session_data[1]}
+            success, resp = sp.handle_logout(request, next_url="/next")
+            assert success is True
+            assert resp.status_code == 302
+            assert "SAMLResponse" in resp.headers["Location"]
+            url = urlparse.urlparse(resp.headers["Location"])
             params = urlparse.parse_qs(url.query)
-            self.assert_('SAMLResponse' in params)
+            assert "SAMLResponse" in params
             logout = samlp.logout_response_from_string(
-                decode_base64_and_inflate(params['SAMLResponse'][0]))
+                decode_base64_and_inflate(params["SAMLResponse"][0])
+            )
             # CHANGE THIS
             # LOGOUT IS RETURNING Responder STATUS
-            self.assertEqual(logout.status.status_code.value,
-                'urn:oasis:names:tc:SAML:2.0:status:Responder')
-            self.assertEqual(logout.destination, 'https://sso.example.com/idp/slo')
-
-    def test_Saml_handle_logout_request_no_subject_id(self):
-        not_on_or_after = int(time.time()) + 3600
-        identity = {'4=id-1': {
-            'https://sso.example.com/idp/metadata': (
-                not_on_or_after, {
-                    'authn_info': [('urn:oasis:names:tc:SAML:2.0:ac:classes:Password', [])],
-                    'name_id': saml.NameID(text='id-1'),
-                    'not_on_or_after': not_on_or_after,
-                    'came_from': '/next',
-                    'ava': {'uid': ['a123456']}
-                }
+            assert (
+                logout.status.status_code.value
+                == "urn:oasis:names:tc:SAML:2.0:status:Responder"
             )
-        }}
-        state = {
-            'entity_ids': ['https://sso.example.com/idp/metadata'],
-            'name_id': saml.NameID(text='id-1'),
-            'entity_id': 'https://sso.example.com/idp/metadata',
-            'not_on_or_after': not_on_or_after,
-            'operation': 'SLO',
-            'reason': '',
-            'sign': False,
-        }
+            assert logout.destination == "https://sso.example.com/idp/slo"
+
+    def test_Saml_handle_logout_request_no_subject_id(
+        self, flask_app, req_session_data
+    ):
         # modifying config in this test, make copy so as not to effect
         # following tests.
         tmp_sp_config = copy.deepcopy(sp_config)
         # create a response to assert upon
         sp = auth.Saml(tmp_sp_config)
         logout_request = create_logout_request(
-            subject_id='id-1',
-            destination='https://foo.example.com/sp/slo',
-            issuer_entity_id='https://sso.example.com/idp/metadata',
-            req_entity_id='https://sso.example.com/idp/metadata')
+            subject_id="id-1",
+            destination="https://foo.example.com/sp/slo",
+            issuer_entity_id="https://sso.example.com/idp/metadata",
+            req_entity_id="https://sso.example.com/idp/metadata",
+        )
         # test SAMLRequest logout
-        with self.app.test_request_context('/',
-                method='GET',
-                query_string=dict(
-                    SAMLRequest=deflate_and_base64_encode(str(logout_request)),
-                    RelayState=deflate_and_base64_encode(logout_request.id))):
+        with flask_app.test_request_context(
+            "/",
+            method="GET",
+            query_string={
+                "SAMLRequest": deflate_and_base64_encode(str(logout_request)),
+                "RelayState": deflate_and_base64_encode(logout_request.id),
+            },
+        ):
             # first need to be logged in, let's pretend
-            session['_saml_identity'] = identity
-            session['_saml_subject_id'] = None
-            session['_saml_state'] = {'id-' + logout_request.id: state}
-            success, _ = sp.handle_logout(request, next_url='/next')
-            self.assertTrue(success)
+            session["_saml_identity"] = req_session_data[0]
+            session["_saml_subject_id"] = None
+            session["_saml_state"] = {"id-" + logout_request.id: req_session_data[1]}
+            success, _ = sp.handle_logout(request, next_url="/next")
+            assert success is True
 
-    def test_Saml_handle_logout_invalid_missing(self):
+    def test_Saml_handle_logout_invalid_missing_all_params(self, flask_app):
         # modifying config in this test, make copy so as not to effect
         # following tests.
         tmp_sp_config = copy.deepcopy(sp_config)
         # test missing any GET/POST parameters
-        with self.app.test_request_context('/',
-                method='GET'):
+        with flask_app.test_request_context("/", method="GET"):
             sp = auth.Saml(tmp_sp_config)
-            try:
+            with pytest.raises(BadRequest) as exc_info:
                 sp.handle_logout(request)
-                self.fail(
-                    'Expected BadRequest on missing SAMLResponse'
-                    ' GET arg')
-            except BadRequest, e:
-                self.assertEqual(400, e.code)
-                self.assertEqual('Unable to find supported binding', e.description)
-        # test missing SAMLRequest/SAMLResponse in GET
-        with self.app.test_request_context('/',
-                method='GET',
-                query_string=dict(RelayState='/next')):
-            sp = auth.Saml(tmp_sp_config)
-            try:
-                sp.handle_logout(request)
-                self.fail(
-                    'Expected BadRequest on missing SAMLRequest/SAMLResponse'
-                    ' GET arg')
-            except BadRequest, e:
-                self.assertEqual(400, e.code)
-                self.assertEqual('Unable to find SAMLRequest or SAMLResponse',
-                                 e.description)
-        # test missing SAMLRequest/SAMLResponse in POST
-        with self.app.test_request_context('/',
-                method='POST',
-                data=dict(RelayState='/next')):
-            # tell config to accept POST binding on the slo endpoint
-            endpoints = tmp_sp_config['service']['sp']['endpoints']
-            slo = endpoints['single_logout_service'][0][0]
-            endpoints['single_logout_service'] = [(slo, BINDING_HTTP_POST)]
-            sp = auth.Saml(tmp_sp_config)
-            try:
-                sp.handle_logout(request)
-                self.fail(
-                    'Expected BadRequest on missing SAMLRequest/SAMLResponse'
-                    ' POST data')
-            except BadRequest, e:
-                self.assertEqual(400, e.code)
-                self.assertEqual('Unable to find SAMLRequest or SAMLResponse',
-                                 e.description)
+            assert 400 == exc_info.value.code
+            assert "Unable to find supported binding" == exc_info.value.description
 
-    def test_Saml_handle_logout_invalid_SAMLResponse(self):
+    def test_Saml_handle_logout_invalid_missing_saml_in_get(self, flask_app):
+        # modifying config in this test, make copy so as not to effect
+        # following tests.
+        tmp_sp_config = copy.deepcopy(sp_config)
+        # test missing SAMLRequest/SAMLResponse in GET
+        with flask_app.test_request_context(
+            "/", method="GET", query_string={"RelayState": "/next"}
+        ):
+            sp = auth.Saml(tmp_sp_config)
+            with pytest.raises(BadRequest) as exc_info:
+                sp.handle_logout(request)
+            assert 400 == exc_info.value.code
+            assert (
+                "Unable to find SAMLRequest or SAMLResponse"
+                == exc_info.value.description
+            )
+
+    def test_Saml_handle_logout_invalid_missing_saml_in_post(self, flask_app):
+        # modifying config in this test, make copy so as not to effect
+        # following tests.
+        tmp_sp_config = copy.deepcopy(sp_config)
+        # test missing SAMLRequest/SAMLResponse in POST
+        with flask_app.test_request_context(
+            "/", method="POST", data={"RelayState": "/next"}
+        ):
+            # tell config to accept POST binding on the slo endpoint
+            endpoints = tmp_sp_config["service"]["sp"]["endpoints"]
+            slo = endpoints["single_logout_service"][0][0]
+            endpoints["single_logout_service"] = [(slo, BINDING_HTTP_POST)]
+            sp = auth.Saml(tmp_sp_config)
+            with pytest.raises(BadRequest) as exc_info:
+                sp.handle_logout(request)
+            assert 400 == exc_info.value.code
+            assert (
+                "Unable to find SAMLRequest or SAMLResponse"
+                == exc_info.value.description
+            )
+
+    def test_Saml_handle_logout_invalid_SAMLResponse_get(self, flask_app):
         # modifying config in this test, make copy so as not to effect
         # following tests.
         tmp_sp_config = copy.deepcopy(sp_config)
         # test invalid SAMLResponse in GET
-        with self.app.test_request_context('/',
-                method='GET',
-                query_string=dict(SAMLResponse='invalid', RelayState='/next')):
+        with flask_app.test_request_context(
+            "/",
+            method="GET",
+            query_string={"SAMLResponse": "invalid", "RelayState": "/next"},
+        ):
             sp = auth.Saml(tmp_sp_config)
-            try:
+            with pytest.raises(BadRequest) as exc_info:
                 sp.handle_logout(request)
-                self.fail(
-                    'Expected BadRequest on invalid SAMLResponse GET arg')
-            except BadRequest, e:
-                self.assertEqual(400, e.code)
-                self.assertEqual('SAML response is invalid', e.description)
-        # test invalid SAMLResponse in POST
-        with self.app.test_request_context('/',
-                method='POST',
-                data=dict(SAMLResponse='invalid', RelayState='/next')):
-            # tell config to accept POST binding on the slo endpoint
-            endpoints = tmp_sp_config['service']['sp']['endpoints']
-            slo = endpoints['single_logout_service'][0][0]
-            endpoints['single_logout_service'] = [(slo, BINDING_HTTP_POST)]
-            sp = auth.Saml(tmp_sp_config)
-            try:
-                sp.handle_logout(request)
-                self.fail(
-                    'Expected BadRequest on invalid SAMLResponse POST data')
-            except BadRequest, e:
-                self.assertEqual(400, e.code)
-                self.assertEqual('SAML response is invalid', e.description)
+            assert 400 == exc_info.value.code
+            assert "SAML response is invalid" == exc_info.value.description
 
-    def test_Saml_handle_logout_invalid_SAMLRequest(self):
+    def test_Saml_handle_logout_invalid_SAMLResponse_post(self, flask_app):
+        # modifying config in this test, make copy so as not to effect
+        # following tests.
+        tmp_sp_config = copy.deepcopy(sp_config)
+        # test invalid SAMLResponse in POST
+        with flask_app.test_request_context(
+            "/", method="POST", data={"SAMLResponse": "invalid", "RelayState": "/next"}
+        ):
+            # tell config to accept POST binding on the slo endpoint
+            endpoints = tmp_sp_config["service"]["sp"]["endpoints"]
+            slo = endpoints["single_logout_service"][0][0]
+            endpoints["single_logout_service"] = [(slo, BINDING_HTTP_POST)]
+            sp = auth.Saml(tmp_sp_config)
+            with pytest.raises(BadRequest) as exc_info:
+                sp.handle_logout(request)
+            assert 400 == exc_info.value.code
+            assert "SAML response is invalid" == exc_info.value.description
+
+    def test_Saml_handle_logout_invalid_SAMLRequest(self, flask_app):
         # modifying config in this test, make copy so as not to effect
         # following tests.
         tmp_sp_config = copy.deepcopy(sp_config)
         # test invalid SAMLRequest
-        with self.app.test_request_context('/',
-                method='GET',
-                query_string=dict(SAMLRequest='invalid', RelayState='/next')):
+        with flask_app.test_request_context(
+            "/",
+            method="GET",
+            query_string={"SAMLRequest": "invalid", "RelayState": "/next"},
+        ):
             sp = auth.Saml(tmp_sp_config)
-            try:
+            with pytest.raises(BadRequest) as exc_info:
                 sp.handle_logout(request)
-                self.fail(
-                    'Expected BadRequest on invalid SAMLRequest GET arg')
-            except BadRequest, e:
-                self.assertEqual(400, e.code)
-                self.assertEqual('SAML request is invalid', e.description)
+            assert 400 == exc_info.value.code
+            assert "SAML request is invalid" == exc_info.value.description
 
-    def test_Saml_get_metadata(self):
-        entity_id = 'https://sso.example.com/idp/metadata'
+
+class TestSamlGetMetadata:
+    def test_Saml_get_metadata_with_private_key(self, flask_app):
+        entity_id = "https://sso.example.com/idp/metadata"
         # modifying config in this test, make copy so as not to effect
         # following tests.
         tmp_sp_config = copy.deepcopy(sp_config)
         # test with defined private key file
-        with self.app.test_request_context('/',
-                method='GET'):
+        with flask_app.test_request_context("/", method="GET"):
             sp = auth.Saml(tmp_sp_config)
             resp = sp.get_metadata()
-            self.assertTrue(
-                'Content-type: text/xml; charset=utf-8' in str(resp.headers))
+            assert "Content-type: text/xml; charset=utf-8" in str(resp.headers)
             metadata_xml = resp.data
-            self.assert_("Signature" in metadata_xml)
+            assert b"Signature" in metadata_xml
             sp._config.load(tmp_sp_config)
             sls = sp._config.metadata.single_logout_service(
-                entity_id, binding=BINDING_HTTP_REDIRECT, typ='idpsso')
-            self.assertEqual(destinations(sls),
-                ['https://sso.example.com/idp/slo'])
+                entity_id, binding=BINDING_HTTP_REDIRECT, typ="idpsso"
+            )
+            assert list(locations(sls)) == ["https://sso.example.com/idp/slo"]
             ssos = sp._config.metadata.single_sign_on_service(entity_id)
-            self.assertEqual(destinations(ssos),
-                ['https://sso.example.com/idp/sso'])
+            assert list(locations(ssos)) == ["https://sso.example.com/idp/sso"]
+
+    def test_Saml_get_metadata_without_private_key(self, flask_app):
+        # modifying config in this test, make copy so as not to effect
+        # following tests.
+        tmp_sp_config = copy.deepcopy(sp_config)
         # test without defined private key file
-        with self.app.test_request_context('/',
-                method='GET'):
-            # bug in pysaml2 2.2.0 https://github.com/rohe/pysaml2/issues/175
-            # TODO fix test when next updating pysaml2
-            # tmp_sp_config['key_file'] = None
-            tmp_sp_config['key_file'] = ''
+        with flask_app.test_request_context("/", method="GET"):
+            tmp_sp_config["key_file"] = None
             sp = auth.Saml(tmp_sp_config)
             resp = sp.get_metadata()
-            self.assertTrue(
-                'Content-type: text/xml; charset=utf-8' in str(resp.headers))
+            assert "Content-type: text/xml; charset=utf-8" in str(resp.headers)
             metadata_xml = resp.data
-            self.assert_(not "Signature" in metadata_xml)
+            assert b"Signature" not in metadata_xml

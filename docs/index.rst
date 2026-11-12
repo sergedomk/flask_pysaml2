@@ -1,12 +1,24 @@
-Welcome to Flask_PySAML2's documentation!
-============================================
+Flask PySAML2
+=============
 
-Contents:
+:release: |release|
+
+A Flask module adding SAML Service Provider support.
+
+.. toctree::
+   :maxdepth: 3
+
+   usage
+
+API Reference
+=============
+
+Information on specific functions, classes, methods, and exception.
 
 .. toctree::
    :maxdepth: 4
 
-   flask_pysaml2
+   api
 
 Indices and tables
 ==================
