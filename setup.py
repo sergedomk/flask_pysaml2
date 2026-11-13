@@ -13,7 +13,7 @@ with open("requirements-testing.txt") as f:
 
 setup(
     name="Flask-Pysaml2",
-    version="2.0",
+    version="2.1",
     url="https://github.com/sergedomk/flask_pysaml2",
     licence="BSD",
     author="Serge Domkowski (orig. Kavi Corporation)",

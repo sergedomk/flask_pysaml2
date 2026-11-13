@@ -14,14 +14,21 @@ The Flask-PySAML2 library is licensed under the Modified BSD License.
 Documentation
 -------------
 
-Complete documentation can be found at https://flask-pysaml2.readthedocs.org/
+Complete documentation can be found at https://flask-pysaml2.readthedocs.io/
 
 CHANGES
 -------
 
+**Version 2.1**
+
+Release on November 12, 2026
+
+* Minor document fixes to get package and docs aligned
+* Version bump
+
 **Version 2.0**
 
-Release pending
+Release on November 12, 2026
 
 * Updated for Python 3.12 (no longer backward compatible to Python 2)
 * Updated `pysaml2` to 7.5.5
