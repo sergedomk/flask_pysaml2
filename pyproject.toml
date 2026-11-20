@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "Flask-Pysaml2"
+version = "2.1"
+description = "Flask and pysaml2 integration."
+readme = "README.rst"
+authors = [
+    {name = "Serge Domkowski (orig. Kavi Corporation)", email = "sergedomk@gmail.com"},
+]
+license-files = ["LICENSE"]
+dynamic = ["dependencies", "optional-dependencies"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Internet :: WWW/HTTP :: WSGI",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+keywords = ["flask", "pysaml2", "saml2", "federated authentication", "authentication"]
+
+[project.urls]
+Repository = "https://github.com/sergedomk/flask_pysaml2"
+Documentation = "https://flask-pysaml2.readthedocs.io/"
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+optional-dependencies.doc = { file = ["requirements-docs.txt"] }
+optional-dependencies.test = { file = ["requirements-testing.txt"] }
+
+[tool.setuptools]
+packages = ["flask_pysaml2"]

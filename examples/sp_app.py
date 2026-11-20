@@ -83,7 +83,7 @@ CONFIG = {
 
 app = Flask(__name__)
 app.secret_key = "SUPER_SECRET_KEY"
-sp = flask_pysaml2.Saml(CONFIG)
+sp = flask_pysaml2.SamlServiceProvider(CONFIG)
 
 
 @app.route("/sp/login")
@@ -109,6 +109,11 @@ def sp_slo():
     # Perform local logout (note: slo can fail below leaving the user logged in elsewhere).
     _success, redirect = sp.handle_logout(request, next_url="/")
     return redirect
+
+
+@app.route("/sp/metadata", methods=["GET"])
+def sp_metadata():
+    return sp.get_metadata()
 
 
 @app.route("/")

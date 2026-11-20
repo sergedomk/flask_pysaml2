@@ -1,38 +1,19 @@
-"""
-Flask-PySAML2
--------------
-
-This library implements an integration for the Flask web framework to the
-PySAML2 library developed by Roland Hedberg.
-
-The Service Provider integration is fairly complete. Identity Provider
-integration is still under development.
-
-Copyright (c) 2012, Kavi Corporation
-License (Modified BSD License), see LICENSE for more details.
-"""
-
 import logging
 import os
 from time import struct_time
-from typing import Any
+from typing import Any, Literal
 
 from flask import Request, Response, make_response, redirect, session
 from saml2 import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
-from saml2.cache import Cache
 from saml2.client import Saml2Client
-from saml2.config import IdPConfig, SPConfig
-from saml2.md import KeyDescriptor
-from saml2.metadata import do_key_descriptor, entity_descriptor, sign_entity_descriptor
 from saml2.s_utils import UnravelError, sid
-from saml2.sigver import security_context
 from werkzeug.exceptions import BadRequest
 
+from flask_pysaml2.cache import AuthDictCache, IdentityCache
+from flask_pysaml2.exception import AuthException
+from flask_pysaml2.saml_provider_base import SamlProviderBase
+
 LOGGER = logging.getLogger(__name__)
-
-
-class AuthException(Exception):
-    """Exception for Authentication errors (SAML2)"""
 
 
 def _handle_logout_request(
@@ -130,77 +111,14 @@ def _handle_logout_response(
     return response
 
 
-def _parse_key_descriptors(certs: list[dict]) -> list[KeyDescriptor]:
-    """Creates the PySAML2 key descriptor for inclusion in a metadata object.
-
-    Args:
-        certs (list): Config information about the certificates and how they
-            are used.
-
-    Returns:
-        (list): key descriptors for all configured certs.
-    """
-    key_descriptors = []
-    for _cert in certs:
-        _cdata = _cert.get("cert_data") or "".join(
-            open(_cert.get("cert_file")).readlines()[1:-1]
-        )
-        key_descriptors.extend(
-            do_key_descriptor(_cdata, _cdata, _cert.get("use", "both"))
-        )
-    return key_descriptors
-
-
-def _parse_metadata_dict_to_inline(metadata: dict) -> dict:
-    """Convert any metadata included as dict to PySAML2's `inline` type.
-
-    Currently PySAML supports remote, local files, and string IdP metadata to
-    be included in the SP config dict as XML. It is also possible to pull your
-    IdP metadata from local JSON files (the format of the JSON is nearly
-    unparsable for any normal human).
-
-    This function adds the ability to include the IdP metadata directly in the
-    SP config as a dict of IdP attributes by hacking around this PySAML2
-    limitation and converting the dict into XML via PySAML2's IdPConfig class.
-
-    Note: In the process of trying to find an alternative which will allow us
-        to NOT be hacking around PySAML so rudely in order to load IdP metadata
-        from a Python dict. https://github.com/rohe/pysaml2/issues/172
-
-    Args:
-        metadata (dict): The IdP metadata this SP is configured for.
-
-    Returns:
-        (dict) config where any metadata `inline_dict` data has been
-            converted to `inline` XML.
-    """
-    if metadata.get("inline_dict") is not None:
-        metadata["inline"] = metadata.get("inline", [])
-        for _idp in metadata.get("inline_dict", []):
-            idp_config = IdPConfig()
-            idp_config.load(_idp)
-            entity_desc = entity_descriptor(idp_config)
-            # Hack for supporting multiple certificates.
-            if _idp.get("certs"):
-                # `certs` config directive overrides `cert_file`.
-                entity_desc.idpsso_descriptor.key_descriptor = _parse_key_descriptors(
-                    _idp["certs"]
-                )
-            idp_metadata_str = str(entity_desc)
-            LOGGER.debug(
-                "IdP XML Metadata for %s: %s", _idp["entityid"], idp_metadata_str
-            )
-            metadata["inline"].append(idp_metadata_str)
-        del metadata["inline_dict"]
-    return metadata
-
-
-class Saml:
+class SamlServiceProvider(SamlProviderBase):
     """
     SAML Wrapper around pysaml2.
 
     Implements SAML2 Service Provider functionality for Flask.
     """
+
+    _saml_context = "sp"
 
     def __init__(self, config):
         """Initialize SAML Service Provider.
@@ -208,10 +126,7 @@ class Saml:
         Args:
             config (dict): Service Provider config info in dict form
         """
-        if config.get("metadata") is not None:
-            config["metadata"] = _parse_metadata_dict_to_inline(config["metadata"])
-        self._config = SPConfig().load(config)
-        self._config.setattr("", "allow_unknown_attributes", True)
+        super().__init__(config)
         # Set discovery end point, if configured for.
         if config["service"]["sp"].get("ds"):
             self.discovery_service_end_point = config["service"]["sp"].get("ds")[0]
@@ -221,7 +136,7 @@ class Saml:
         next_url: str = "/",
         binding: str = BINDING_HTTP_REDIRECT,
         selected_idp: str | None = None,
-    ) -> Response:
+    ) -> Response | tuple[dict, Literal[200]]:
         """Start SAML Authentication login process.
 
         Args:
@@ -344,9 +259,11 @@ class Saml:
             **{"return": return_url},
         )
         LOGGER.debug("Redirect to Discovery Service %s", disco_url)
-        return (session_id, make_response("", 302, {"Location": disco_url}))
+        return session_id, make_response("", 302, {"Location": disco_url})
 
-    def handle_discovery_response(self, request: Request) -> Response:
+    def handle_discovery_response(
+        self, request: Request
+    ) -> Response | tuple[dict, Literal[200]]:
         """Handle SAML Discovery Service response. This method is basically
         a wrapper around `authenticate` with a little extra logic for getting
         the `entityID` out of the request and the next_url and binding that was
@@ -443,7 +360,7 @@ class Saml:
 
         relay_state = request.form.get("RelayState", "/")
         LOGGER.debug("Returning redirect to %s", relay_state)
-        return (saml_assertion_info, redirect(relay_state))
+        return saml_assertion_info, redirect(relay_state)
 
     def logout(
         self, next_url: str = "/", expire: struct_time | str | int | None = None
@@ -569,47 +486,3 @@ class Saml:
 
         LOGGER.debug("Returning redirect to complete/continue the logout process")
         return success, response
-
-    def get_metadata(self) -> Response:
-        """Returns SAML Service Provider Metadata"""
-        edesc = entity_descriptor(self._config)
-        if self._config.key_file:
-            _, edesc = sign_entity_descriptor(
-                edesc, None, security_context(self._config)
-            )
-        response = make_response(str(edesc))
-        response.headers["Content-type"] = "text/xml; charset=utf-8"
-        return response
-
-
-class AuthDictCache(dict):
-    """
-    Adapter to make working with session cache easier
-    """
-
-    def __init__(self, session_instance, key):
-        self.session = session_instance
-        self.key = key
-        super().__init__(self.session_data)
-
-    @property
-    def session_data(self):
-        """Return session data associated with this cache"""
-        return self.session.get(self.key, {})
-
-    def sync(self):
-        """Sync's the cache object with the underlying session store"""
-        objs = {}
-        objs.update(self)
-        self.session[self.key] = objs
-
-
-class IdentityCache(Cache):
-    """
-    Adapter for the Identity Cache pysaml2 Cache object
-    """
-
-    def __init__(self, session_instance, key):
-        super().__init__()
-        self._db = AuthDictCache(session_instance, key)
-        self._sync = True
