@@ -2,6 +2,7 @@ import logging
 
 from flask import Request, Response, make_response, session
 from saml2 import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
+from saml2.population import Population
 from saml2.s_utils import UnknownPrincipal, UnsupportedBinding
 from saml2.server import Server
 from saml2.sigver import encrypt_cert_from_item
@@ -43,7 +44,7 @@ class SamlIdentityProvider(SamlProviderBase):
         LOGGER.debug("Identity cache %s", identity_cache)
         LOGGER.debug("Subject Id %s", subject_id)
 
-        idp_server = Server(self._config, cache=identity_cache)
+        idp_server = Server(config=self._config, cache={})
 
         if request.args:
             binding = BINDING_HTTP_REDIRECT
@@ -55,8 +56,11 @@ class SamlIdentityProvider(SamlProviderBase):
         if "SAMLRequest" in request.values:
             try:
                 saml_request = idp_server.parse_authn_request(
-                    request.values["SAMLRequest"], binding
-                )
+                    enc_request=request.values["SAMLRequest"],
+                    binding=binding,
+                    sigalg=request.values.get("SigAlg"),
+                    signature=request.values.get("Signature"),
+                ).message
             except KeyError:
                 raise BadRequest("Message signature verification failure")
 
@@ -71,29 +75,30 @@ class SamlIdentityProvider(SamlProviderBase):
                 raise
 
             try:
-                _encrypt_cert = encrypt_cert_from_item(saml_request.message)
+                _encrypt_cert = encrypt_cert_from_item(saml_request)
                 resp_args = idp_server.response_args(saml_request)
-                _identity = identity_cache.get_identity(subject_id)
+                _identity, _ = Population(identity_cache).get_identity(subject_id)
                 _resp = idp_server.create_authn_response(
                     _identity,
                     userid=subject_id,
+                    name_id=subject_id,
                     encrypt_cert=_encrypt_cert,
                     **resp_args,
                 )
-            except UnknownPrincipal as excp:
+            except UnknownPrincipal as exc:
                 _resp = idp_server.create_error_response(
-                    saml_request.id, destination, excp
+                    saml_request.id, destination, exc
                 )
-            except UnsupportedBinding as excp:
+            except UnsupportedBinding as exc:
                 _resp = idp_server.create_error_response(
-                    saml_request.id, destination, excp
+                    saml_request.id, destination, exc
                 )
 
             http_args = idp_server.apply_binding(
                 binding_out,
                 f"{_resp}",
                 destination,
-                relay_state=request.form.get("RelayState", "/"),
+                relay_state=request.values.get("RelayState", "/"),
                 response=True,
             )
 

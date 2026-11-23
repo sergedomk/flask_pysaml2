@@ -1,6 +1,6 @@
 import logging
 
-from saml2.config import IdPConfig
+from saml2.config import config_factory
 from saml2.md import KeyDescriptor
 from saml2.metadata import do_key_descriptor, entity_descriptor
 
@@ -28,7 +28,7 @@ def _parse_key_descriptors(certs: list[dict]) -> list[KeyDescriptor]:
     return key_descriptors
 
 
-def parse_metadata_dict_to_inline(metadata: dict) -> dict:
+def parse_metadata_dict_to_inline(metadata: dict, typ: str) -> dict:
     """Convert any metadata included as dict to PySAML2's `inline` type.
 
     Currently, PySAML supports remote, local files, and string IdP/SP metadata to
@@ -46,6 +46,7 @@ def parse_metadata_dict_to_inline(metadata: dict) -> dict:
 
     Args:
         metadata (dict): The IdP/SP metadata this SP/IdP is configured for.
+        typ (str): Whether we are getting metadata for an SP or IdP service.
 
     Returns:
         (dict) config where any metadata `inline_dict` data has been
@@ -53,20 +54,24 @@ def parse_metadata_dict_to_inline(metadata: dict) -> dict:
     """
     if metadata.get("inline_dict") is not None:
         metadata["inline"] = metadata.get("inline", [])
-        for _idp in metadata.get("inline_dict", []):
-            idp_config = IdPConfig()
-            idp_config.load(_idp)
-            entity_desc = entity_descriptor(idp_config)
+        for _config_dict in metadata.get("inline_dict", []):
+            _config = config_factory(typ, _config_dict)
+            entity_desc = entity_descriptor(_config)
             # Hack for supporting multiple certificates.
-            if _idp.get("certs"):
+            if _config_dict.get("certs"):
                 # `certs` config directive overrides `cert_file`.
-                entity_desc.idpsso_descriptor.key_descriptor = _parse_key_descriptors(
-                    _idp["certs"]
-                )
-            idp_metadata_str = str(entity_desc)
+                if typ == "sp":
+                    entity_desc.idpsso_descriptor.key_descriptor = (
+                        _parse_key_descriptors(_config_dict["certs"])
+                    )
+                else:
+                    entity_desc.spsso_descriptor.key_descriptor = (
+                        _parse_key_descriptors(_config_dict["certs"])
+                    )
+            _metadata_str = str(entity_desc)
             LOGGER.debug(
-                "IdP XML Metadata for %s: %s", _idp["entityid"], idp_metadata_str
+                "IdP XML Metadata for %s: %s", _config_dict["entityid"], _metadata_str
             )
-            metadata["inline"].append(idp_metadata_str)
+            metadata["inline"].append(_metadata_str)
         del metadata["inline_dict"]
     return metadata

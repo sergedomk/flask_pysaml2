@@ -16,7 +16,9 @@ class SamlProviderBase:
             config (dict): Provider config info in dict form
         """
         if config.get("metadata") is not None:
-            config["metadata"] = parse_metadata_dict_to_inline(config["metadata"])
+            config["metadata"] = parse_metadata_dict_to_inline(
+                config["metadata"], typ=self._saml_context
+            )
         self._config = config_factory(self._saml_context, config)
         self._config.setattr("", "allow_unknown_attributes", True)
 

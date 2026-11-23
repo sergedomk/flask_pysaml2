@@ -50,6 +50,23 @@ def unpack_form(_str, ver="SAMLRequest"):
     return {ver: sr, "RelayState": rs}
 
 
+def create_authn_request(binding: str) -> str:
+    config = config_factory("sp", SP_CONFIG)
+    client = Saml2Client(config)
+    sign_post = (
+        config.getattr("authn_requests_signed")
+        if binding != BINDING_HTTP_REDIRECT
+        else False
+    )
+    _, request = client.create_authn_request(
+        vorg="https://foo.example.com/sp/metadata",
+        destination="https://sso.example.com/idp/sso",
+        binding=binding,
+        sign=sign_post,
+    )
+    return str(request)
+
+
 def create_authn_response(
     session_id,
     identity: dict | None = None,

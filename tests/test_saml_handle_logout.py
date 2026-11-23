@@ -46,34 +46,18 @@ class TestSamlHandleLogout:
         return identity, state
 
     @pytest.fixture
-    def req_session_data(self):
-        not_on_or_after = int(time.time()) + 3600
-        identity = {
-            "4=id-1": {
-                "https://sso.example.com/idp/metadata": (
-                    not_on_or_after,
-                    {
-                        "authn_info": [
-                            ("urn:oasis:names:tc:SAML:2.0:ac:classes:Password", [])
-                        ],
-                        "name_id": saml.NameID(text="id-1"),
-                        "not_on_or_after": not_on_or_after,
-                        "came_from": "/next",
-                        "ava": {"uid": ["a123456"]},
-                    },
-                )
-            }
-        }
+    def req_session_data(self, logged_in_identity):
+        entity_id = "https://sso.example.com/idp/metadata"
         state = {
-            "entity_ids": ["https://sso.example.com/idp/metadata"],
+            "entity_ids": [entity_id],
             "name_id": saml.NameID(text="id-1"),
-            "entity_id": "https://sso.example.com/idp/metadata",
-            "not_on_or_after": not_on_or_after,
+            "entity_id": entity_id,
+            "not_on_or_after": logged_in_identity["4=id-1"][entity_id][0],
             "operation": "SLO",
             "reason": "",
             "sign": False,
         }
-        return identity, state
+        return logged_in_identity, state
 
     def test_Saml_handle_logout_response_get(
         self, flask_app, sp_config, resp_session_data
