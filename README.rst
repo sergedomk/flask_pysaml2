@@ -19,6 +19,27 @@ Complete documentation can be found at https://flask-pysaml2.readthedocs.io/
 CHANGES
 -------
 
+**Version 2.2**
+
+Release on November 25, 2026
+
+* Updated docs to preferred rtd theme
+* Moved some docs to own pages for better readability
+* Switched from setup.py to pyproject.toml
+* Added metadata to SP example
+* Converted flask_pysaml2 module to package
+* Added IdP class with SSO handling
+* Added IdP example
+* Split tests into separate files
+* Fixed a few IdP SSO issues
+* Fixed a few IdP metadata issues
+* Improved usage documentation
+* Improved session handling
+* Added session handling logic to allow IdP to use identity cache to manage user sessions
+* Made a bunch of modifications around NameId to/from str
+* Updated examples to allow full SP -> IdP -> SP SSO transaction
+* Added/updated tests
+
 **Version 2.1**
 
 Release on November 12, 2026
