@@ -1,3 +1,4 @@
+import base64
 import os
 import urllib.parse as urlparse
 from typing import Any
@@ -50,14 +51,9 @@ def unpack_form(_str, ver="SAMLRequest"):
     return {ver: sr, "RelayState": rs}
 
 
-def create_authn_request(binding: str) -> str:
+def create_authn_request(binding: str, sign_post: bool = False) -> str:
     config = config_factory("sp", SP_CONFIG)
     client = Saml2Client(config)
-    sign_post = (
-        config.getattr("authn_requests_signed")
-        if binding != BINDING_HTTP_REDIRECT
-        else False
-    )
     _, request = client.create_authn_request(
         vorg="https://foo.example.com/sp/metadata",
         destination="https://sso.example.com/idp/sso",
@@ -65,6 +61,15 @@ def create_authn_request(binding: str) -> str:
         sign=sign_post,
     )
     return str(request)
+
+
+def get_signature_for_authn_request(message, sigalg) -> bytes:
+    config = config_factory("sp", SP_CONFIG)
+    client = Saml2Client(config)
+    signer = client.sec.sec_backend.get_signer(sigalg)
+    string = f"{urlparse.urlencode({'SAMLRequest': message})}&{urlparse.urlencode({'SigAlg': sigalg})}"
+    string_enc = string.encode("ascii")
+    return base64.b64encode(signer.sign(string_enc))
 
 
 def create_authn_response(

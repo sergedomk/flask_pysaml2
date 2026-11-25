@@ -2,6 +2,7 @@ import base64
 
 import pytest
 from flask import request, session
+from saml2.ident import decode
 from saml2.sigver import SignatureError
 from werkzeug.exceptions import BadRequest
 
@@ -56,7 +57,7 @@ class TestSamlHandleAssertion:
             # outstanding queury cache should now be empty
             assert session.get("_saml_outstanding_queries", {}) == {}
             # identity and subject_id should now be set
-            assert session.get("_saml_subject_id").text == name_id
+            assert decode(session.get("_saml_subject_id")).text == name_id
 
     @pytest.mark.skip(
         reason="Encryption in pysaml2 2.0.0 is possibly broken. If not, I don't know how to get it not blow up."
@@ -97,7 +98,7 @@ class TestSamlHandleAssertion:
             assert resp.headers["Location"] == "/next"
             # identity and subject_id should now be set
             assert name_id in next(iter(session.get("_saml_identity", {}).keys()))
-            assert session.get("_saml_subject_id").text == name_id
+            assert decode(session.get("_saml_subject_id")).text == name_id
 
     def test_Saml_handle_assertion_allow_unsolicited_with_outstanding_queries(
         self, flask_app, sp_config
@@ -129,7 +130,7 @@ class TestSamlHandleAssertion:
             assert session.get("_saml_outstanding_queries", {}) == {}
             # identity and subject_id should now be set
             assert name_id in next(iter(session.get("_saml_identity", {}).keys()))
-            assert session.get("_saml_subject_id").text == name_id
+            assert decode(session.get("_saml_subject_id")).text == name_id
 
     def test_Saml_handle_assertion_missing_SAMLResponse(self, flask_app, sp_config):
         # test missing SAMLResponse

@@ -53,7 +53,7 @@ class TestSamlLogout:
             sp = auth.SamlServiceProvider(sp_config)
             # first need to be logged in, let's pretend
             session["_saml_identity"] = identity_get
-            session["_saml_subject_id"] = saml.NameID(text="id-1")
+            session["_saml_subject_id"] = "4=id-1"
             resp = sp.logout(next_url="/next")
             assert resp.status_code == 302
             assert "SAMLRequest" in resp.headers["Location"]
@@ -70,7 +70,7 @@ class TestSamlLogout:
             assert logout.name_id.text == "id-1"
             # check the caches still contain data
             assert session["_saml_identity"] == identity_get
-            assert session["_saml_subject_id"].text == "id-1"
+            assert session["_saml_subject_id"] == "4=id-1"
             # verify state cache
             assert logout.id in session["_saml_state"]
             assert (
@@ -93,7 +93,7 @@ class TestSamlLogout:
             sp = auth.SamlServiceProvider(sp_config)
             # first need to be logged in, let's pretend
             session["_saml_identity"] = identity_get
-            session["_saml_subject_id"] = saml.NameID(text="id-1")
+            session["_saml_subject_id"] = "4=id-1"
             resp = sp.logout(next_url="/next")
             assert resp.status_code == 302
             assert "SAMLRequest" in resp.headers["Location"]
@@ -113,7 +113,7 @@ class TestSamlLogout:
             sp = auth.SamlServiceProvider(sp_config)
             # first need to be logged in, let's pretend
             session["_saml_identity"] = identity_post
-            session["_saml_subject_id"] = saml.NameID(text="id-1")
+            session["_saml_subject_id"] = "4=id-1"
             resp, status = sp.logout(next_url="/next")
             assert status == 200
             _form = unpack_form(resp["data"][3])
@@ -136,7 +136,7 @@ class TestSamlLogout:
             sp = auth.SamlServiceProvider(sp_config)
             # first need to be logged in, let's pretend
             session["_saml_identity"] = identity_get
-            session["_saml_subject_id"] = saml.NameID(text="id-1")
+            session["_saml_subject_id"] = "4=id-1"
             with pytest.raises(
                 auth.AuthException,
                 match="Signature requested for this Saml logout request, but no private key file configured",

@@ -7,9 +7,9 @@ from flask import Request, Response, make_response, redirect, session
 from saml2 import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
 from saml2.client import Saml2Client
 from saml2.s_utils import UnravelError, sid
+from saml2.saml import NameID
 from werkzeug.exceptions import BadRequest
 
-from flask_pysaml2.cache import AuthDictCache, IdentityCache
 from flask_pysaml2.exception import AuthException
 from flask_pysaml2.saml_provider_base import SamlProviderBase
 
@@ -17,14 +17,14 @@ LOGGER = logging.getLogger(__name__)
 
 
 def _handle_logout_request(
-    client: Saml2Client, request: Request, subject_id: str, binding: str
+    client: Saml2Client, request: Request, subject_id: NameID | None, binding: str
 ) -> Response:
     """Handle SAML Authentication logout request (GET).
 
     Args:
         client (Saml2Client): instance of SAML client class.
         request (Request): Flask request object for this HTTP transaction.
-        subject_id (string): Id of the subject we are processing the
+        subject_id (NameID): Id of the subject we are processing the
             logout for.
         binding (string): the SAML binding method being used for this
             request.
@@ -181,9 +181,7 @@ class SamlServiceProvider(SamlProviderBase):
         if not len(bindable_idps):
             raise AuthException("Unable to locate valid IdP for this request")
 
-        # Retrieve cache.
-        outstanding_queries_cache = AuthDictCache(session, "_saml_outstanding_queries")
-        LOGGER.debug("Outstanding queries cache %s", outstanding_queries_cache)
+        LOGGER.debug("Outstanding queries cache %s", self.outstanding_queries_cache)
 
         if len(bindable_idps) > 1:
             # Redirect to discovery service
@@ -220,8 +218,8 @@ class SamlServiceProvider(SamlProviderBase):
 
         LOGGER.debug("Saving session_id ( %s ) in outstanding queries", session_id)
         # cache the outstanding query
-        outstanding_queries_cache.update({session_id: next_url})
-        outstanding_queries_cache.sync()
+        self.outstanding_queries_cache.update({session_id: next_url})
+        self.outstanding_queries_cache.sync()
 
         LOGGER.debug(
             "Outstanding queries cache %s", session["_saml_outstanding_queries"]
@@ -284,11 +282,10 @@ class SamlServiceProvider(SamlProviderBase):
         next_url = "/"
 
         # Retrieve cache. Get `next_url` from cache.
-        outstanding_queries_cache = AuthDictCache(session, "_saml_outstanding_queries")
-        if session_id in outstanding_queries_cache:
-            next_url = outstanding_queries_cache[session_id]
-            del outstanding_queries_cache[session_id]
-        outstanding_queries_cache.sync()
+        if session_id in self.outstanding_queries_cache:
+            next_url = self.outstanding_queries_cache[session_id]
+            del self.outstanding_queries_cache[session_id]
+        self.outstanding_queries_cache.sync()
         # Get the selected IdP from the Discovery Service response.
         selected_idp = Saml2Client.parse_discovery_service_response(
             query=request.query_string, returnIDParam=b"entityID"
@@ -315,27 +312,24 @@ class SamlServiceProvider(SamlProviderBase):
         """
         if not request.form.get("SAMLResponse"):
             raise BadRequest("SAMLResponse missing from POST")
-        # retrieve cache
-        outstanding_queries_cache = AuthDictCache(session, "_saml_outstanding_queries")
-        identity_cache = IdentityCache(session, "_saml_identity")
 
-        LOGGER.debug("Outstanding queries cache %s", outstanding_queries_cache)
-        LOGGER.debug("Identity cache %s", identity_cache)
+        LOGGER.debug("Outstanding queries cache %s", self.outstanding_queries_cache)
+        LOGGER.debug("Identity cache %s", self.identity_cache)
 
         # use pysaml2 to process the SAML authentication response
-        client = Saml2Client(self._config, identity_cache=identity_cache)
+        client = Saml2Client(self._config, identity_cache=self.identity_cache)
         saml_response = client.parse_authn_request_response(
             request.form["SAMLResponse"],
             BINDING_HTTP_POST,
-            outstanding=outstanding_queries_cache,
+            outstanding=self.outstanding_queries_cache,
         )
         if saml_response is None:
             raise BadRequest("SAML response is invalid")
         # make sure outstanding query cache is cleared for this session_id
         session_id = saml_response.session_id()
-        if session_id in outstanding_queries_cache:
-            del outstanding_queries_cache[session_id]
-        outstanding_queries_cache.sync()
+        if session_id in self.outstanding_queries_cache:
+            del self.outstanding_queries_cache[session_id]
+        self.outstanding_queries_cache.sync()
 
         saml_subject_id = saml_response.name_id
         # Assemble SAML assertion info for returning to the method caller.
@@ -350,7 +344,7 @@ class SamlServiceProvider(SamlProviderBase):
         LOGGER.debug("SAML Session Info ( %s )", saml_assertion_info)
 
         # set subject Id in cache to retrieved name_id
-        session["_saml_subject_id"] = saml_subject_id
+        self.set_subject_id_in_session(saml_subject_id)
 
         LOGGER.debug(
             "Outstanding queries cache %s", session["_saml_outstanding_queries"]
@@ -379,15 +373,13 @@ class SamlServiceProvider(SamlProviderBase):
         Raises:
             AuthException: Can not resolve IdP single logout end-point.
         """
-        # retrieve cache
-        state_cache = AuthDictCache(session, "_saml_state")
-        identity_cache = IdentityCache(session, "_saml_identity")
-        subject_id = session.get("_saml_subject_id")
+        subject_id = self.subject_id_from_session
+
         # don't logout if not logged in
         if subject_id is None:
             raise AuthException("Unable to retrieve subject id for logout")
         # fail if signing requested but no private key configured
-        if self._config.getattr("logout_requests_signed") == True:
+        if self._config.getattr("logout_requests_signed") is True:
             LOGGER.debug("key_file %s", self._config.key_file)
             if not self._config.key_file or not os.path.exists(self._config.key_file):
                 raise AuthException(
@@ -395,18 +387,20 @@ class SamlServiceProvider(SamlProviderBase):
                     + " but no private key file configured"
                 )
 
-        LOGGER.debug("State cache %s", state_cache)
-        LOGGER.debug("Identity cache %s", identity_cache)
+        LOGGER.debug("State cache %s", self.state_cache)
+        LOGGER.debug("Identity cache %s", self.identity_cache)
         LOGGER.debug("Subject Id %s", subject_id)
 
         # use pysaml2 to initiate the SAML logout request
         client = Saml2Client(
-            self._config, state_cache=state_cache, identity_cache=identity_cache
+            self._config,
+            state_cache=self.state_cache,
+            identity_cache=self.identity_cache,
         )
         saml_response = client.global_logout(subject_id, expire=expire)
 
         # sync the state to cache
-        state_cache.sync()
+        self.state_cache.sync()
 
         LOGGER.debug("State cache %s", session["_saml_state"])
         LOGGER.debug("Identity cache %s", session["_saml_identity"])
@@ -443,18 +437,17 @@ class SamlServiceProvider(SamlProviderBase):
         Raises:
             BadRequest: when SAML request/response data is missing.
         """
-        # retrieve cache
-        state_cache = AuthDictCache(session, "_saml_state")
-        identity_cache = IdentityCache(session, "_saml_identity")
-        subject_id = session.get("_saml_subject_id")
+        subject_id = self.subject_id_from_session
 
-        LOGGER.debug("State cache %s", state_cache)
-        LOGGER.debug("Identity cache %s", identity_cache)
+        LOGGER.debug("State cache %s", self.state_cache)
+        LOGGER.debug("Identity cache %s", self.identity_cache)
         LOGGER.debug("Subject Id %s", subject_id)
 
         # use pysaml2 to complete the SAML logout request
         client = Saml2Client(
-            self._config, state_cache=state_cache, identity_cache=identity_cache
+            self._config,
+            state_cache=self.state_cache,
+            identity_cache=self.identity_cache,
         )
         # let's try to figure out what binding is being used and what type of
         # logout call we are handling
@@ -476,10 +469,13 @@ class SamlServiceProvider(SamlProviderBase):
 
         # cache the state and remove subject if logout was successful or
         # this subject was already logged out.
-        success = not subject_id or identity_cache.get_identity(subject_id) == ({}, [])
+        success = not subject_id or self.identity_cache.get_identity(subject_id) == (
+            {},
+            [],
+        )
         if success:
             session.pop("_saml_subject_id", None)
-        state_cache.sync()
+        self.state_cache.sync()
 
         LOGGER.debug("State cache %s", session["_saml_state"])
         LOGGER.debug("Identity cache %s", session["_saml_identity"])

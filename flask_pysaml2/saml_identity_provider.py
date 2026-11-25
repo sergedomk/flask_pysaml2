@@ -1,14 +1,15 @@
 import logging
 
-from flask import Request, Response, make_response, session
+from flask import Request, Response, make_response
 from saml2 import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
-from saml2.population import Population
+from saml2.authn_context import INTERNETPROTOCOLPASSWORD
 from saml2.s_utils import UnknownPrincipal, UnsupportedBinding
+from saml2.saml import NameID
 from saml2.server import Server
 from saml2.sigver import encrypt_cert_from_item
+from saml2.time_util import in_a_while
 from werkzeug.exceptions import BadRequest
 
-from flask_pysaml2.cache import IdentityCache
 from flask_pysaml2.saml_provider_base import SamlProviderBase
 
 LOGGER = logging.getLogger(__name__)
@@ -22,6 +23,17 @@ class SamlIdentityProvider(SamlProviderBase):
     """
 
     _saml_context = "idp"
+
+    def add_user_identity(self, subject_id: NameID, session_info: dict):
+        """Add the specified user identity to the identity cache"""
+        return self.users.add_information_about_person(
+            {
+                "issuer": self._config.entityid,
+                "name_id": subject_id,
+                "not_on_or_after": in_a_while(minutes=5),
+            }
+            | session_info
+        )
 
     def handle_sso_request(self, request: Request) -> Response:
         """Handle SAML Authentication SSO request.
@@ -37,11 +49,9 @@ class SamlIdentityProvider(SamlProviderBase):
         Raises:
             BadRequest: when error with SAML response from Identity Provider.
         """
-        # retrieve cache
-        identity_cache = IdentityCache(session, "_saml_identity")
-        subject_id = session.get("_saml_subject_id")
+        subject_id = self.subject_id_from_session
 
-        LOGGER.debug("Identity cache %s", identity_cache)
+        LOGGER.debug("Identity cache %s", self.identity_cache)
         LOGGER.debug("Subject Id %s", subject_id)
 
         idp_server = Server(config=self._config, cache={})
@@ -75,14 +85,17 @@ class SamlIdentityProvider(SamlProviderBase):
                 raise
 
             try:
-                _encrypt_cert = encrypt_cert_from_item(saml_request)
                 resp_args = idp_server.response_args(saml_request)
-                _identity, _ = Population(identity_cache).get_identity(subject_id)
+                _identity = self.get_user_identity(subject_id)
                 _resp = idp_server.create_authn_response(
-                    _identity,
+                    identity=_identity,
                     userid=subject_id,
                     name_id=subject_id,
-                    encrypt_cert=_encrypt_cert,
+                    encrypt_cert=encrypt_cert_from_item(saml_request),
+                    authn={
+                        "class_ref": INTERNETPROTOCOLPASSWORD,
+                        "authn_auth": "http://www.example.com/login",
+                    },
                     **resp_args,
                 )
             except UnknownPrincipal as exc:

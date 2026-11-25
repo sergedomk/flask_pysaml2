@@ -4,6 +4,7 @@ import time
 import pytest
 from flask import request, session
 from saml2 import BINDING_HTTP_POST, saml, samlp
+from saml2.ident import code
 from saml2.s_utils import decode_base64_and_inflate, deflate_and_base64_encode
 from werkzeug.exceptions import BadRequest
 
@@ -50,7 +51,7 @@ class TestSamlHandleLogout:
         entity_id = "https://sso.example.com/idp/metadata"
         state = {
             "entity_ids": [entity_id],
-            "name_id": saml.NameID(text="id-1"),
+            "name_id": "4=id-1",
             "entity_id": entity_id,
             "not_on_or_after": logged_in_identity["4=id-1"][entity_id][0],
             "operation": "SLO",
@@ -82,7 +83,7 @@ class TestSamlHandleLogout:
         ):
             # first need to be logged in, let's pretend
             session["_saml_identity"] = resp_session_data[0]
-            session["_saml_subject_id"] = saml.NameID(text="id-1")
+            session["_saml_subject_id"] = "4=id-1"
             session["_saml_state"] = {session_id: resp_session_data[1]}
             success, resp = sp.handle_logout(request, next_url="/next")
             assert session.get("_saml_identity", None) == {}
@@ -117,7 +118,7 @@ class TestSamlHandleLogout:
             endpoints["single_logout_service"] = [(slo, BINDING_HTTP_POST)]
             # first need to be logged in, let's pretend
             session["_saml_identity"] = resp_session_data[0]
-            session["_saml_subject_id"] = saml.NameID(text="id-1")
+            session["_saml_subject_id"] = "4=id-1"
             session["_saml_state"] = {session_id: resp_session_data[1]}
             success, resp = sp.handle_logout(request, next_url="/next")
             assert success is True
@@ -144,8 +145,10 @@ class TestSamlHandleLogout:
         ):
             # first need to be logged in, let's pretend
             session["_saml_identity"] = req_session_data[0]
-            session["_saml_subject_id"] = saml.NameID(
-                name_qualifier="https://sso.example.com/idp/metadata", text="id-1"
+            session["_saml_subject_id"] = code(
+                saml.NameID(
+                    name_qualifier="https://sso.example.com/idp/metadata", text="id-1"
+                )
             )
             session["_saml_state"] = {"id-" + logout_request.id: req_session_data[1]}
             success, resp = sp.handle_logout(request, next_url="/next")
