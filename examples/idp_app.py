@@ -5,7 +5,7 @@ import flask_pysaml2
 
 # The config is a pysaml2 config (https://pysaml2.readthedocs.io/en/latest/howto/config.html).
 CONFIG = {
-    "entityid": "https://127.0.0.1:5000/sp/metadata",
+    "entityid": "https://127.0.0.1:5001/idp/metadata",
     "contact_person": [
         {
             "given_name": "John",
@@ -15,20 +15,24 @@ CONFIG = {
         }
     ],
     "service": {
-        "sp": {
-            "name": "Test Service Provider",
+        "idp": {
+            "name": "Test Identity Provider",
             "endpoints": {
-                "assertion_consumer_service": ["https://127.0.0.1:5000/sp/acs"],
-                "single_logout_service": [
-                    ("https://127.0.0.1:5000/sp/slo", BINDING_HTTP_REDIRECT)
+                "single_sign_on_service": [
+                    ("https://127.0.0.1:5001/idp/sso", BINDING_HTTP_REDIRECT)
                 ],
+                # "single_logout_service": [
+                #     ("https://127.0.0.1:5001/idp/slo", BINDING_HTTP_REDIRECT)
+                # ],
             },
-            "idp": ["https://sso.example.com/idp/metadata"],
-            "logout_requests_signed": True,
-            "authn_requests_signed": True,
-            "want_response_signed": False,
-            "want_assertion_signed": True,
-        },
+            "policy": {
+                "default": {
+                    "lifetime": {"hours": 24},
+                    "attribute_restrictions": None,
+                    "name_form": "urn:oasis:names:tc:SAML:2.0:attrname-format:uri",
+                },
+            },
+        }
     },
     "debug": True,
     "xmlsec_binary": "/usr/bin/xmlsec1",
@@ -36,46 +40,31 @@ CONFIG = {
     "cert_file": "<replace with full path to sso public certificate>",
     "ca_certs": None,
     "metadata": {
-        # We added `inline_dict` as a means to dynamically configure IDPs.
-        #
-        # You'll want to replace the below with the attributes for the IDP
-        # you'll be connecting with.
         "inline_dict": [
             {
-                "entityid": "https://sso.example.com/idp/metadata",
+                "entityid": "https://127.0.0.1:5000/sp/metadata",
                 "contact_person": [
                     {
-                        "email_address": "helpdesk@kavi.com",
-                        "contact_type": "technical",
-                    },
+                        "given_name": "John",
+                        "sur_name": "Smith",
+                        "email_address": "john.smith@foo.example.com",
+                        "type": "technical",
+                    }
                 ],
                 "service": {
-                    "idp": {
-                        "name": "Test Identity Provider",
+                    "sp": {
+                        "name": "Test Service Provider",
                         "endpoints": {
-                            "single_sign_on_service": [
-                                (
-                                    "https://sso.example.com/idp/sso",
-                                    BINDING_HTTP_REDIRECT,
-                                )
+                            "assertion_consumer_service": [
+                                "https://127.0.0.1:5000/sp/acs"
                             ],
                             "single_logout_service": [
-                                (
-                                    "https://sso.example.com/idp/slo",
-                                    BINDING_HTTP_REDIRECT,
-                                )
+                                ("https://127.0.0.1:5000/sp/slo", BINDING_HTTP_REDIRECT)
                             ],
-                        },
-                        "policy": {
-                            "default": {
-                                "lifetime": {"hours": 24},
-                                "attribute_restrictions": None,
-                                "name_form": "urn:oasis:names:tc:SAML:2.0:attrname-format:uri",
-                            },
                         },
                     },
                 },
-                "cert_file": "<replace with full path to IPD public certificate>",
+                "cert_file": "<replace with full path to sso public certificate>",
             }
         ],
     },
@@ -83,22 +72,25 @@ CONFIG = {
 
 app = Flask(__name__)
 app.secret_key = "SUPER_SECRET_KEY"
+
 idp = flask_pysaml2.SamlIdentityProvider(CONFIG)
 
 
 @app.route("/idp/sso")
 def idp_sso():
-    return idp.handle_sso_request(request)
+    idp.set_subject_id_in_session("4=id-1")
+    idp.add_user_identity(
+        subject_id=idp.subject_id_from_session,
+        session_info={"uid": ["a123456"], "ava": {"uid": ["a123456"]}},
+    )
+    response = idp.handle_sso_request(request)
+
+    return response
 
 
-@app.route("/sp/metadata", methods=["GET"])
+@app.route("/idp/metadata", methods=["GET"])
 def idp_metadata():
     return idp.get_metadata()
-
-
-@app.route("/")
-def hello_world():
-    return "<p>Hello, World!</p>"
 
 
 if __name__ == "__main__":
